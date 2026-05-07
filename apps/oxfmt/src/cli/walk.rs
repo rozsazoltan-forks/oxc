@@ -9,6 +9,7 @@ use ignore::gitignore::Gitignore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::instrument;
 
+use oxc_config::{all_paths_have_vcs_boundary, configure_walk_builder};
 use oxc_diagnostics::{DiagnosticSender, DiagnosticService, OxcDiagnostic};
 
 use super::resolve::{build_global_ignore_matchers, is_ignored, resolve_file_scope_config};
@@ -244,9 +245,17 @@ impl ScopedWalker {
             Arc::new(GlobMatcher::new(self.cwd.clone(), self.glob_patterns.clone(), &walk_targets))
         });
 
+        // Compute once and share across both walks (pre-scan and main).
+        let has_vcs_boundary = all_paths_have_vcs_boundary(&walk_targets, &self.cwd);
+
         // Pre-scan: discover nested config file locations
         let config_dirs = if detect_nested {
-            prescan_config_locations(&walk_targets, &ignore_file_matchers, with_node_modules)
+            prescan_config_locations(
+                &walk_targets,
+                has_vcs_boundary,
+                &ignore_file_matchers,
+                with_node_modules,
+            )
         } else {
             vec![]
         };
@@ -283,6 +292,7 @@ impl ScopedWalker {
         walk_and_stream(
             &self.cwd,
             &walk_targets,
+            has_vcs_boundary,
             Arc::clone(&ignore_file_matchers),
             with_node_modules,
             glob_matcher.as_ref(),
@@ -379,6 +389,7 @@ impl GlobMatcher {
 #[instrument(level = "debug", name = "oxfmt::walk::prescan_config_locations", skip_all)]
 fn prescan_config_locations(
     target_paths: &[PathBuf],
+    has_vcs_boundary: bool,
     ignore_file_matchers: &Arc<[Gitignore]>,
     with_node_modules: bool,
 ) -> Vec<PathBuf> {
@@ -399,7 +410,7 @@ fn prescan_config_locations(
     });
 
     let mut config_dirs = vec![];
-    for entry in configure_walk_builder(builder).build().flatten() {
+    for entry in configure_oxfmt_walk_builder(&mut builder, has_vcs_boundary).build().flatten() {
         let dir = entry.path();
         if !config_discovery().find_configs_in_directory(dir).is_empty() {
             config_dirs.push(dir.to_path_buf());
@@ -475,6 +486,7 @@ fn build_config_ancestors(config_dirs: &[PathBuf]) -> Arc<FxHashSet<PathBuf>> {
 fn walk_and_stream(
     cwd: &Path,
     target_paths: &[PathBuf],
+    has_vcs_boundary: bool,
     ignore_file_matchers: Arc<[Gitignore]>,
     with_node_modules: bool,
     glob_matcher: Option<&Arc<GlobMatcher>>,
@@ -545,38 +557,25 @@ fn walk_and_stream(
     };
 
     let num_of_threads = rayon::current_num_threads();
-    configure_walk_builder(inner)
+    configure_oxfmt_walk_builder(&mut inner, has_vcs_boundary)
         // Use the same thread count as rayon (controlled by `--threads`)
         .threads(num_of_threads)
         .build_parallel()
         .visit(&mut builder);
 }
 
-/// Configure a `WalkBuilder` with the standard settings matching Prettier's behavior.
+/// Wrap [`oxc_config::configure_walk_builder`] with Oxfmt-specific options.
 ///
-/// Shared between the pre-scan walk and the main parallel walk.
-fn configure_walk_builder(mut builder: ignore::WalkBuilder) -> ignore::WalkBuilder {
-    builder
+/// Git-related settings come from the shared helper to align with Oxlint.
+/// Prettier only reads `.gitignore` in the cwd and does not respect `.git/info/exclude`.
+fn configure_oxfmt_walk_builder(
+    builder: &mut ignore::WalkBuilder,
+    has_vcs_boundary: bool,
+) -> &mut ignore::WalkBuilder {
+    configure_walk_builder(builder, has_vcs_boundary)
         // Do not follow symlinks like Prettier does.
         // See https://github.com/prettier/prettier/pull/14627
         .follow_links(false)
-        // Include hidden files and directories except those we explicitly skip
-        .hidden(false)
-        // Do not respect `.ignore` file
-        .ignore(false)
-        // Do not search upward
-        // NOTE: Prettier only searches current working directory
-        .parents(false)
-        // Also do not respect globals
-        .git_global(false)
-        // But respect downward nested `.gitignore` files
-        // NOTE: Prettier does not: https://github.com/prettier/prettier/issues/4081
-        .git_ignore(true)
-        // Also do not respect `.git/info/exclude`
-        .git_exclude(false)
-        // Git is not required
-        .require_git(false);
-    builder
 }
 
 struct WalkVisitorBuilder {
