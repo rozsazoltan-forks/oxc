@@ -143,7 +143,7 @@ fn format_import_decls_with_sort<'a, 'iter>(
             join.entry(decl.span, stmt);
             count += 1;
         } else {
-            // Some other statement or end of statements
+            // Some other statement
             next_stmt = Some(stmt);
             break;
         }
