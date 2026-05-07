@@ -1674,6 +1674,8 @@ impl<'a> PeepholeOptimizations {
             && let Some(param) = &catch.param
             && let BindingPattern::BindingIdentifier(ident) = &param.pattern
             && (catch.body.body.is_empty() || ctx.scoping().symbol_is_unused(ident.symbol_id()))
+            // Direct eval can reference the catch parameter even when static analysis sees no use.
+            && !ctx.scoping().scope_flags(catch.scope_id()).contains_direct_eval()
             // Don't remove catch parameter when the body has a `var` with the same name.
             // In `catch (e) { var e = x }`, `var e` hoists to function scope but the assignment
             // targets the catch parameter. Removing the catch param changes semantics.

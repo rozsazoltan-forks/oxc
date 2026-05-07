@@ -753,6 +753,8 @@ fn optional_catch_binding() {
     test("try { foo } catch(e) {}", "try { foo } catch {}");
     test("try { foo } catch(e) {foo}", "try { foo } catch {foo}");
     test_same("try { foo } catch(e) { bar(e) }");
+    test_same("try { throw 'caught'; } catch (e) { eval('console.log(e)'); }");
+    test_same("try { throw 'caught'; } catch (e) { function f() { eval('console.log(e)') } f() }");
     test_same("try { foo } catch([e]) {}");
     test_same("try { foo } catch({e}) {}");
     test_same("try { foo } catch(e) { var e = baz; bar(e) }");
