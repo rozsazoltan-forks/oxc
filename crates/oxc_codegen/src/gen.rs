@@ -614,10 +614,10 @@ impl Gen for CatchClause<'_> {
         }
         p.print_soft_space();
         p.print_comments_at(self.body.span.start);
-        // Consume the space flag set by comment printing to ensure proper spacing before the opening brace
-        if !p.options.minify && p.print_next_indent_as_space {
-            p.print_hard_space();
-            p.print_next_indent_as_space = false;
+        // Flush the pending-indent-as-space flag so `/* */ {` doesn't
+        // collapse to `/* */{`.
+        if !p.options.minify {
+            p.consume_pending_indent_space();
         }
         p.print_block_statement(&self.body, ctx);
     }
@@ -776,7 +776,7 @@ impl Gen for FunctionBody<'_> {
             // Print trailing statement comments.
             if let Some(comments) = comments_at_end {
                 p.print_comments(&comments);
-                p.print_next_indent_as_space = false;
+                p.clear_pending_indent_space();
             }
         });
         p.needs_semicolon = false;
@@ -1097,7 +1097,7 @@ impl Gen for ExportSpecifier<'_> {
         if let Some(comments) = p.get_comments(self.local.span().start) {
             p.print_comments(&comments);
             p.print_soft_space();
-            p.print_next_indent_as_space = false;
+            p.clear_pending_indent_space();
         }
         self.local.print(p, ctx);
         let local_name = get_module_export_name(&self.local, p);
@@ -1107,7 +1107,7 @@ impl Gen for ExportSpecifier<'_> {
             if let Some(comments) = p.get_comments(self.exported.span().start) {
                 p.print_comments(&comments);
                 p.print_soft_space();
-                p.print_next_indent_as_space = false;
+                p.clear_pending_indent_space();
             }
             self.exported.print(p, ctx);
         }
@@ -1598,10 +1598,7 @@ impl GenExpr for ObjectExpression<'_> {
                     p.print_soft_space();
                     if let Some(comments) = p.get_comments(item.span().start) {
                         p.print_comments(&comments);
-                        if p.print_next_indent_as_space {
-                            p.print_hard_space();
-                            p.print_next_indent_as_space = false;
-                        }
+                        p.consume_pending_indent_space();
                     }
                 }
                 item.print(p, ctx);
@@ -1924,10 +1921,7 @@ impl GenExpr for ConditionalExpression<'_> {
             p.print_soft_space();
             if let Some(comments) = p.get_comments(self.alternate.span().start) {
                 p.print_comments(&comments);
-                if p.print_next_indent_as_space {
-                    p.print_hard_space();
-                    p.print_next_indent_as_space = false;
-                }
+                p.consume_pending_indent_space();
             }
             self.alternate.print_expr(p, Precedence::Yield, ctx & Context::FORBID_IN);
         });

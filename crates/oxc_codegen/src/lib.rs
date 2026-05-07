@@ -518,12 +518,33 @@ impl<'a> Codegen<'a> {
         if self.options.minify {
             return;
         }
-        if self.print_next_indent_as_space {
-            self.print_hard_space();
-            self.print_next_indent_as_space = false;
+        if self.consume_pending_indent_space() {
             return;
         }
         self.code.print_indent(self.indent as usize);
+    }
+
+    /// Comment-printing and inline-statement-body emission set
+    /// `print_next_indent_as_space` so the *next* emit becomes a single
+    /// space instead of indent — keeping `/* … */ stmt` glued together
+    /// and `if (x) bar()` on one line. Returns `true` when a space was
+    /// emitted, so callers that *also* want to print indent can skip it.
+    #[inline]
+    fn consume_pending_indent_space(&mut self) -> bool {
+        if self.print_next_indent_as_space {
+            self.print_hard_space();
+            self.print_next_indent_as_space = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop the pending-indent-as-space flag without emitting anything. Used
+    /// after manual comment handling that already produced the right spacing.
+    #[inline]
+    fn clear_pending_indent_space(&mut self) {
+        self.print_next_indent_as_space = false;
     }
 
     #[inline]
