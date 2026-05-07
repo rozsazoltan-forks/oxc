@@ -176,6 +176,38 @@ fn indented_statement_mappings_start_after_generated_indent() {
     assert_source_maps_after_indent(&tokens, pos(1, 2), pos(1, 0), pos(1, 1));
 }
 
+// `Directive`, `ImportDeclaration`, `ExportNamedDeclaration`,
+// `ExportAllDeclaration`, and `ExportDefaultDeclaration` previously called
+// `add_source_mapping` *before* `print_indent`, anchoring the mapping at
+// gen col 0 (whitespace) instead of the start of the keyword.
+#[test]
+fn top_level_decl_mappings_start_after_generated_indent() {
+    // Wrap the imports/exports in `if (true) { ... }` so the body is
+    // indented, exposing the order of `add_source_mapping` vs `print_indent`.
+    let tokens = sourcemap_tokens(
+        r#"if (true) {
+"use strict";
+import { x } from "x";
+export { x } from "x";
+export * from "x";
+export default 1;
+}"#,
+        SourceType::mjs(),
+    );
+
+    // Directive `"use strict"` source col 0 of line 1 → gen col 1 (after tab),
+    // not gen col 0.
+    assert_source_maps_after_indent(&tokens, pos(1, 0), pos(1, 0), pos(1, 1));
+    // ImportDeclaration
+    assert_source_maps_after_indent(&tokens, pos(2, 0), pos(2, 0), pos(2, 1));
+    // ExportNamedDeclaration
+    assert_source_maps_after_indent(&tokens, pos(3, 0), pos(3, 0), pos(3, 1));
+    // ExportAllDeclaration
+    assert_source_maps_after_indent(&tokens, pos(4, 0), pos(4, 0), pos(4, 1));
+    // ExportDefaultDeclaration
+    assert_source_maps_after_indent(&tokens, pos(5, 0), pos(5, 0), pos(5, 1));
+}
+
 #[test]
 fn class_member_mappings_start_before_member_keys() {
     let tokens = sourcemap_tokens(
