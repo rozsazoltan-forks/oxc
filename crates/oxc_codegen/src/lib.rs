@@ -570,8 +570,8 @@ impl<'a> Codegen<'a> {
             self.dedent();
             self.print_indent();
         }
-        self.print_ascii_byte(b'}');
         self.add_source_mapping_end(span);
+        self.print_ascii_byte(b'}');
     }
 
     fn print_block_start(&mut self, span: Span) {
@@ -584,8 +584,8 @@ impl<'a> Codegen<'a> {
     fn print_block_end(&mut self, span: Span) {
         self.dedent();
         self.print_indent();
-        self.print_ascii_byte(b'}');
         self.add_source_mapping_end(span);
+        self.print_ascii_byte(b'}');
     }
 
     fn print_body(&mut self, stmt: &Statement<'_>, need_space: bool, ctx: Context) {

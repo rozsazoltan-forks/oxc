@@ -1562,8 +1562,8 @@ impl Gen for ArrayExpression<'_> {
             p.dedent();
             p.print_indent();
         }
-        p.print_ascii_byte(b']');
         p.add_source_mapping_end(self.span);
+        p.print_ascii_byte(b']');
     }
 }
 
@@ -1613,8 +1613,8 @@ impl GenExpr for ObjectExpression<'_> {
             } else if len > 0 {
                 p.print_soft_space();
             }
-            p.print_ascii_byte(b'}');
             p.add_source_mapping_end(self.span);
+            p.print_ascii_byte(b'}');
         });
     }
 }
