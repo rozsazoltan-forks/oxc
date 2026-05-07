@@ -1899,10 +1899,13 @@ name = "oxc_config"
 version = "0.0.0"
 dependencies = [
  "fast-glob",
+ "ignore",
  "oxc-schemars",
  "oxc_diagnostics",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

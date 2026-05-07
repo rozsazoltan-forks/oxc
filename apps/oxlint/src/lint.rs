@@ -170,7 +170,7 @@ impl CliRunner {
             paths.push(self.cwd.clone());
         }
 
-        let walker = Walk::new(&paths, &ignore_options, override_builder);
+        let walker = Walk::new(&paths, &self.cwd, &ignore_options, override_builder);
         let mut paths = walker.paths();
 
         // NAPI tests build `oxlint` with `testing` feature enabled.
