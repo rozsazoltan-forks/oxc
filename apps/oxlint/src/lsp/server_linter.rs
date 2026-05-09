@@ -536,6 +536,10 @@ impl Tool for ServerLinter {
 
         let text_edits = fix_all_text_edit(actions.into_iter());
 
+        if text_edits.is_empty() {
+            return Ok(None);
+        }
+
         Ok(Some(WorkspaceEdit {
             #[expect(clippy::disallowed_types)]
             changes: Some(std::collections::HashMap::from([(uri, text_edits)])),
