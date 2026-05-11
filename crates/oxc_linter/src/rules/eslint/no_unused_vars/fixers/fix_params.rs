@@ -6,8 +6,17 @@ use crate::fixer::{RuleFix, RuleFixer};
 impl NoUnusedVars {
     /// Rename an unused function parameter to match `argsIgnorePattern`.
     ///
-    /// Only simple identifier parameters are handled in this phase.
-    /// Destructuring parameters are left for follow-up work.
+    /// ```js
+    /// function foo(unused) {}
+    /// function foo2(unused = 1) {}
+    /// ```
+    ///
+    /// becomes:
+    ///
+    /// ```js
+    /// function foo(_unused) {}
+    /// function foo2(_unused = 1) {}
+    /// ```
     pub(in super::super) fn rename_unused_function_parameter<'a>(
         &self,
         fixer: RuleFixer<'_, 'a>,
