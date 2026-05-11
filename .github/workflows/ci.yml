@@ -284,6 +284,19 @@ jobs:
         run: |
           pnpm --filter "./apps/oxfmt" build-test
           pnpm --filter "./apps/oxfmt" test
+      # Conformance ---
+      - uses: namespacelabs/nscloud-cache-action@15799a6b54e5765f85b2aac25b3f0df43ed571c0 # v1.4.3
+        if: steps.filter.outputs.changed == 'true'
+        with:
+          # Cache `~/.degit` to reuse degit's tarball cache across CI runs
+          path: /home/runner/.degit
+      - if: steps.filter.outputs.changed == 'true'
+        name: Download conformance fixtures
+        run: pnpm --filter "./apps/oxfmt" download-fixtures
+      - if: steps.filter.outputs.changed == 'true'
+        name: Run conformance tests
+        run: pnpm --filter "./apps/oxfmt" conformance
+      # --- Conformance
       - if: steps.filter.outputs.changed == 'true'
         run: |
           git diff --exit-code # Must commit everything
