@@ -328,12 +328,8 @@ impl<'a> Traverse<'a, TransformState<'a>> for ExplicitResourceManagement<'a> {
                             ExportDefaultDeclarationKind::ClassDeclaration(class_decl)
                                 if class_decl.id.is_some() =>
                             {
-                                let id = class_decl.id.take().unwrap();
-
-                                *ctx.scoping_mut().symbol_flags_mut(id.symbol_id()) =
-                                    SymbolFlags::FunctionScopedVariable;
-
-                                (BoundIdentifier::from_binding_ident(&id), id.span)
+                                let binding = Self::preserve_class_expression_name(class_decl, ctx);
+                                (binding, SPAN)
                             }
                             ExportDefaultDeclarationKind::FunctionDeclaration(_) => {
                                 program_body.push(stmt);
@@ -881,17 +877,15 @@ impl<'a> ExplicitResourceManagement<'a> {
         )
     }
 
-    /// `class C {}` -> `var C = class {};`
+    /// `class C {}` -> `var C = class C {};`
     fn transform_class_decl(
         mut class_decl: ArenaBox<'a, Class<'a>>,
         ctx: &mut TraverseCtx<'a>,
     ) -> Statement<'a> {
-        let id = class_decl.id.take().expect("ClassDeclaration should have an id");
+        let binding = Self::preserve_class_expression_name(&class_decl, ctx);
 
         class_decl.r#type = ClassType::ClassExpression;
         let class_expr = Expression::ClassExpression(class_decl);
-
-        *ctx.scoping_mut().symbol_flags_mut(id.symbol_id()) = SymbolFlags::FunctionScopedVariable;
 
         Statement::VariableDeclaration(ctx.ast.alloc_variable_declaration(
             SPAN,
@@ -899,12 +893,33 @@ impl<'a> ExplicitResourceManagement<'a> {
             ctx.ast.vec1(ctx.ast.variable_declarator(
                 SPAN,
                 VariableDeclarationKind::Var,
-                BindingPattern::BindingIdentifier(ctx.ast.alloc(id)),
+                binding.create_binding_pattern(ctx),
                 NONE,
                 Some(class_expr),
                 false,
             )),
             false,
         ))
+    }
+
+    /// Move the original class id symbol to a new `var`-style outer binding, and create a fresh
+    /// `Class`-flagged symbol in the class scope for the named class expression's inner binding.
+    ///
+    /// Returns the outer `BoundIdentifier` (reusing the original symbol id) that the caller should
+    /// use for the surrounding `var` declarator. Mirrors the swap in
+    /// `decorator::legacy::transform_class_declaration_with_class_decorators`.
+    fn preserve_class_expression_name(
+        class_decl: &Class<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> BoundIdentifier<'a> {
+        let id = class_decl.id.as_ref().expect("ClassDeclaration should have an id");
+        let inner_binding =
+            ctx.generate_binding(id.name, class_decl.scope_id(), SymbolFlags::Class);
+        let outer_symbol_id = id
+            .symbol_id
+            .replace(Some(inner_binding.symbol_id))
+            .expect("class always has a symbol id");
+        *ctx.scoping_mut().symbol_flags_mut(outer_symbol_id) = SymbolFlags::FunctionScopedVariable;
+        BoundIdentifier::new(id.name, outer_symbol_id)
     }
 }
