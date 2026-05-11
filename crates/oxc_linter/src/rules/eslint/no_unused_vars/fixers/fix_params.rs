@@ -6,16 +6,15 @@ use crate::fixer::{RuleFix, RuleFixer};
 impl NoUnusedVars {
     /// Rename an unused function parameter to match `argsIgnorePattern`.
     ///
-    /// Only simple identifier parameters are handled in this phase. Default
-    /// parameters and destructuring parameters are left for follow-up work.
+    /// Only simple identifier parameters are handled in this phase.
+    /// Destructuring parameters are left for follow-up work.
     pub(in super::super) fn rename_unused_function_parameter<'a>(
         &self,
         fixer: RuleFixer<'_, 'a>,
         symbol: &Symbol<'_, 'a>,
         param: &FormalParameter<'a>,
     ) -> RuleFix {
-        if param.initializer.is_some()
-            || param.has_modifier()
+        if param.has_modifier()
             || param.pattern.is_destructuring_pattern()
             || param.pattern.get_binding_identifier().is_none()
         {

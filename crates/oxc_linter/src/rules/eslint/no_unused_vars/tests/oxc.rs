@@ -1155,12 +1155,17 @@ fn test_arguments() {
 fn test_argument_fix() {
     let pass = vec![];
     let fail = vec![
-        // Default and destructuring parameters are intentionally diagnosed
+        // Destructuring parameters are intentionally diagnosed
         // without a fix in this first parameter-renaming phase.
-        ("function foo(unused = 1) {} foo()", None),
         ("function foo({ unused }) {} foo()", None),
     ];
     let fix = vec![
+        (
+            "function foo(unused = 1) {} foo()",
+            "function foo(_unused = 1) {} foo()",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
         (
             "function foo(unused) {} foo()",
             "function foo(_unused) {} foo()",
