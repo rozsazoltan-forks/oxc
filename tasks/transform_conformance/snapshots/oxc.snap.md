@@ -23,15 +23,9 @@ Passed: 229/377
 
 # babel-plugin-transform-explicit-resource-management (2/4)
 * export-class-name/input.js
-Symbol span mismatch for "C":
-after transform: SymbolId(1): Span { start: 31, end: 32 }
-rebuilt        : SymbolId(2): Span { start: 0, end: 0 }
 Symbol reference IDs mismatch for "C":
 after transform: SymbolId(1): [ReferenceId(1), ReferenceId(2), ReferenceId(3), ReferenceId(7)]
 rebuilt        : SymbolId(2): [ReferenceId(0), ReferenceId(5), ReferenceId(6)]
-Symbol span mismatch for "C":
-after transform: SymbolId(3): Span { start: 0, end: 0 }
-rebuilt        : SymbolId(3): Span { start: 31, end: 32 }
 Symbol reference IDs mismatch for "C":
 after transform: SymbolId(3): []
 rebuilt        : SymbolId(3): [ReferenceId(4)]

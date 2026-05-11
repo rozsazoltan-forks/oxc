@@ -1,6 +1,6 @@
 commit: 6402dbbf
 
-Passed: 692/1165
+Passed: 694/1165
 
 # All Passed:
 * babel-plugin-transform-logical-assignment-operators
@@ -167,7 +167,7 @@ x Output mismatch
 x Output mismatch
 
 
-# babel-plugin-transform-explicit-resource-management (20/28)
+# babel-plugin-transform-explicit-resource-management (22/28)
 * integration/commonjs-transform/input.js
 x Output mismatch
 
@@ -198,28 +198,6 @@ rebuilt        : SymbolId(5): ScopeId(4)
 
 * transform-sync/named-evaluation/input.js
 x Output mismatch
-
-* transform-top-level/hoisting/input.mjs
-Symbol span mismatch for "A":
-after transform: SymbolId(6): Span { start: 257, end: 258 }
-rebuilt        : SymbolId(7): Span { start: 0, end: 0 }
-Symbol span mismatch for "A":
-after transform: SymbolId(9): Span { start: 0, end: 0 }
-rebuilt        : SymbolId(8): Span { start: 257, end: 258 }
-Symbol span mismatch for "B":
-after transform: SymbolId(7): Span { start: 275, end: 276 }
-rebuilt        : SymbolId(9): Span { start: 0, end: 0 }
-Symbol span mismatch for "B":
-after transform: SymbolId(10): Span { start: 0, end: 0 }
-rebuilt        : SymbolId(10): Span { start: 275, end: 276 }
-
-* transform-top-level/hoisting-default-class/input.mjs
-Symbol span mismatch for "C":
-after transform: SymbolId(1): Span { start: 37, end: 38 }
-rebuilt        : SymbolId(2): Span { start: 0, end: 0 }
-Symbol span mismatch for "C":
-after transform: SymbolId(2): Span { start: 0, end: 0 }
-rebuilt        : SymbolId(3): Span { start: 37, end: 38 }
 
 * transform-top-level/hoisting-mutate-outer-class-binding/input.js
 x Output mismatch
