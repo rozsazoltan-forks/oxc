@@ -1196,6 +1196,18 @@ fn test_argument_fix() {
             Some(json!([{ "args": "all", "argsIgnorePattern": "^_" }])),
             FixKind::DangerousSuggestion,
         ),
+        (
+            "class Foo { method(@dec unused: string) {} } new Foo().method('x')",
+            "class Foo { method(@dec _unused: string) {} } new Foo().method('x')",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "const marker = 1; class Foo { method(@dec(marker) unused: string) {} } new Foo().method('x')",
+            "const marker = 1; class Foo { method(@dec(marker) _unused: string) {} } new Foo().method('x')",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
     ];
 
     Tester::new(NoUnusedVars::NAME, NoUnusedVars::PLUGIN, pass, fail).expect_fix(fix).test();
