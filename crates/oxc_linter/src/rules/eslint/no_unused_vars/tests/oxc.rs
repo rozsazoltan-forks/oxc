@@ -1208,6 +1208,48 @@ fn test_argument_fix() {
             None,
             FixKind::DangerousSuggestion,
         ),
+        (
+            "const _unused = 1; function foo(unused) { return _unused } foo()",
+            "const _unused = 1; function foo(_unused0) { return _unused } foo()",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "const _unused = 1; function foo(unused) { return function() { return _unused } } foo()",
+            "const _unused = 1; function foo(_unused0) { return function() { return _unused } } foo()",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "function foo(unused) { return _unused } foo()",
+            "function foo(_unused0) { return _unused } foo()",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "function foo(unused) { { let _unused = 1; console.log(_unused); } } foo()",
+            "function foo(_unused) { { let _unused = 1; console.log(_unused); } } foo()",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "type _unused = number; function foo(unused: _unused) {} foo(1 as _unused)",
+            "type _unused = number; function foo(_unused: _unused) {} foo(1 as _unused)",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "function foo(unused: _unused) {} foo(1 as _unused)",
+            "function foo(_unused: _unused) {} foo(1 as _unused)",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
+        (
+            "const _unused = 1; function foo(unused: typeof _unused) {} foo(1)",
+            "const _unused = 1; function foo(_unused0: typeof _unused) {} foo(1)",
+            None,
+            FixKind::DangerousSuggestion,
+        ),
     ];
 
     Tester::new(NoUnusedVars::NAME, NoUnusedVars::PLUGIN, pass, fail).expect_fix(fix).test();
