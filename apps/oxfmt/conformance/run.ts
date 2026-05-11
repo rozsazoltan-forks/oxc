@@ -4,6 +4,7 @@ import { createTwoFilesPatch } from "diff";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import prettier from "prettier";
+import * as sveltePlugin from "prettier-plugin-svelte";
 import { format } from "../dist/index.js";
 
 const CONFORMANCE_DIR = import.meta.dirname;
@@ -23,6 +24,8 @@ type Source = {
   ext?: string;
   /** Files to exclude (e.g. test runner files that are not fixtures) */
   excludes?: string[];
+  /** Transform relative path to a filepath for formatting (e.g. "xxx/input.html" → "xxx.svelte") */
+  resolveFilePath?: (name: string) => string;
 };
 
 const categories: Category[] = [
@@ -141,6 +144,35 @@ const categories: Category[] = [
     optionSets: [{ printWidth: 80 }, { printWith: 100 }],
     notes: {},
   },
+  {
+    name: "svelte",
+    sources: [
+      {
+        dir: join(FIXTURES_DIR, "plugin-svelte"),
+        ext: "input.html",
+        excludes: ["syntax-error"],
+        resolveFilePath: (name) => name.replace("/input.html", ".svelte"),
+      },
+    ],
+    optionSets: [
+      { printWidth: 80, svelte: {} },
+      {
+        printWidth: 120,
+        singleQuote: true,
+        htmlWhitespaceSensitivity: "ignore",
+        bracketSameLine: true,
+        // For prettier
+        svelteIndentScriptAndStyle: true,
+        svelteSortOrder: "options-scripts-styles-markup",
+        // For oxfmt
+        svelte: {
+          indentScriptAndStyle: true,
+          sortOrder: "options-scripts-styles-markup",
+        },
+      },
+    ],
+    notes: {},
+  },
 ];
 
 // ---
@@ -204,7 +236,8 @@ function collectFixtures(sources: Source[]): Fixture[] {
       const relPath = relative(FIXTURES_DIR, fullPath);
       if (source.excludes?.some((s) => relPath.includes(s))) continue;
 
-      results.push({ name: relPath, fullPath });
+      const name = source.resolveFilePath?.(relPath) ?? relPath;
+      results.push({ name, fullPath });
     }
   }
 
@@ -252,8 +285,9 @@ async function compareWithPrettier(
   let prettierResult: string;
   try {
     prettierResult = await prettier.format(content, {
-      filepath: fileName,
       ...options,
+      filepath: fileName,
+      plugins: [sveltePlugin],
     });
   } catch {
     prettierResult = "ERROR";

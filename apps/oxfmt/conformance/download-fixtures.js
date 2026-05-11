@@ -27,11 +27,11 @@ const sources = [
     repo: "shoelace-style/webawesome/packages/webawesome/src/components",
     version: "v3.5.0",
   },
-  // {
-  //   name: "plugin-svelte",
-  //   repo: "sveltejs/prettier-plugin-svelte/tests",
-  //   version: pkg.dependencies["prettier-plugin-svelte"],
-  // },
+  {
+    name: "plugin-svelte",
+    repo: "sveltejs/prettier-plugin-svelte/test/formatting/samples",
+    version: `v${pkg.dependencies["prettier-plugin-svelte"]}`,
+  },
 ];
 
 await Promise.all(
