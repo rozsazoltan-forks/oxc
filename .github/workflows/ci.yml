@@ -267,7 +267,7 @@ jobs:
       - uses: ./.github/actions/check-changes
         id: filter
         with:
-          paths: apps/oxfmt/,npm/oxfmt/,pnpm-lock.yaml,package.json
+          paths: apps/oxfmt/,npm/oxfmt/,crates/oxc_formatter/,crates/oxc_config/,pnpm-lock.yaml,package.json
           token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ github.event.pull_request.number }}
       - uses: oxc-project/setup-node@ab97f03642370d79a7e96dd286bd02a1be40e0ba # v1.3.0
@@ -406,7 +406,7 @@ jobs:
       - uses: ./.github/actions/check-changes
         id: filter
         with:
-          paths: apps/oxfmt/,npm/oxfmt/,pnpm-lock.yaml,package.json
+          paths: apps/oxfmt/,npm/oxfmt/,crates/oxc_formatter/,crates/oxc_config/,pnpm-lock.yaml,package.json
           token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ github.event.pull_request.number }}
       - uses: oxc-project/setup-node@ab97f03642370d79a7e96dd286bd02a1be40e0ba # v1.3.0
