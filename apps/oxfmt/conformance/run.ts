@@ -99,8 +99,6 @@ const categories: Category[] = [
     notes: {
       "externals/prettier/js/multiparser-html/issue-10691.js":
         "js-in-html(`<script>`)-in-js needs lot more work; Please see oxc_formatter/src/print/template/embed/html.rs",
-      "externals/webawesome/relative-time/relative-time.test.ts":
-        "html-in-js: Need to solve `label({ embed, hug }))` + `shouldExpandLastArg`",
     },
   },
   {

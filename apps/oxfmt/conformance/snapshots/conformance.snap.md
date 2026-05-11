@@ -60,7 +60,7 @@
 
 ## html-in-js
 
-### Option 1: 189/191 (98.95%)
+### Option 1: 190/191 (99.48%)
 
 ```json
 {"printWidth":80}
@@ -69,7 +69,6 @@
 | File | Note |
 | :--- | :--- |
 | [externals/prettier/js/multiparser-html/issue-10691.js](diffs/html-in-js/externals__prettier__js__multiparser-html__issue-10691.js.md) | js-in-html(`<script>`)-in-js needs lot more work; Please see oxc_formatter/src/print/template/embed/html.rs |
-| [externals/webawesome/relative-time/relative-time.test.ts](diffs/html-in-js/externals__webawesome__relative-time__relative-time.test.ts.md) | html-in-js: Need to solve `label({ embed, hug }))` + `shouldExpandLastArg` |
 
 ### Option 2: 190/191 (99.48%)
 

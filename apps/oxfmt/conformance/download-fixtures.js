@@ -25,7 +25,7 @@ const sources = [
   {
     name: "webawesome",
     repo: "shoelace-style/webawesome/packages/webawesome/src/components",
-    version: "v3.5.0",
+    version: "v3.6.0",
   },
   {
     name: "plugin-svelte",
