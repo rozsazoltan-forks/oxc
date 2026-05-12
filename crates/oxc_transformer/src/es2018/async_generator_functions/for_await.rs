@@ -144,10 +144,9 @@ impl<'a> AsyncGeneratorFunctions<'a> {
             let mut statements = ctx.ast.vec_with_capacity(2);
             statements.push(assignment_statement);
             let stmt_body = &mut stmt.body;
-            if let Statement::BlockStatement(block) = stmt_body
-                && !block.body.is_empty()
-            {
-                statements.push(stmt_body.take_in(ctx.ast));
+            match stmt_body {
+                Statement::BlockStatement(block) if block.body.is_empty() => {}
+                _ => statements.push(stmt_body.take_in(ctx.ast)),
             }
             statements
         };

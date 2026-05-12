@@ -2,7 +2,7 @@ commit: d0c1b455
 
 semantic_test262 Summary:
 AST Parsed     : 47095/47095 (100.00%)
-Positive Passed: 45452/47095 (96.51%)
+Positive Passed: 45454/47095 (96.52%)
 semantic Error: tasks/coverage/test262/test/language/arguments-object/cls-decl-async-private-gen-meth-args-trailing-comma-multiple.js
 Scope flags mismatch:
 after transform: ScopeId(2): ScopeFlags(StrictMode | Function)
@@ -13452,16 +13452,6 @@ semantic Error: tasks/coverage/test262/test/language/statements/for-await-of/asy
 Scope parent mismatch:
 after transform: ScopeId(3): Some(ScopeId(2))
 rebuilt        : ScopeId(6): Some(ScopeId(5))
-
-semantic Error: tasks/coverage/test262/test/language/statements/for-await-of/let-block-with-newline.js
-Unresolved references mismatch:
-after transform: ["arguments", "let", "require"]
-rebuilt        : ["arguments", "require"]
-
-semantic Error: tasks/coverage/test262/test/language/statements/for-await-of/let-identifier-with-newline.js
-Unresolved references mismatch:
-after transform: ["arguments", "let", "require"]
-rebuilt        : ["arguments", "require"]
 
 semantic Error: tasks/coverage/test262/test/language/statements/for-of/dstr/var-obj-ptrn-rest-getter.js
 Bindings mismatch:
