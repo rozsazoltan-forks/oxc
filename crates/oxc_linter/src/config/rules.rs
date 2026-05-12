@@ -1,5 +1,6 @@
 use std::{borrow::Cow, fmt};
 
+use cow_utils::CowUtils;
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use schemars::{
@@ -292,11 +293,53 @@ impl JsonSchema for OxlintRules {
         }
 
         #[expect(unused)]
-        #[derive(Debug, JsonSchema)]
-        #[schemars(
-            description = "See [Oxlint Rules](https://oxc.rs/docs/guide/usage/linter/rules.html)"
-        )]
+        #[derive(Debug)]
         struct DummyRuleMap(pub FxHashMap<String, DummyRule>);
+
+        impl JsonSchema for DummyRuleMap {
+            fn schema_name() -> String {
+                "DummyRuleMap".to_string()
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                "DummyRuleMap".into()
+            }
+
+            fn json_schema(r#gen: &mut SchemaGenerator) -> Schema {
+                let rules_enum = RULES.iter().map(|r| {
+                    if r.plugin_name() == "eslint" {
+                        r.name().to_string()
+                    } else {
+                        format!(
+                            "{}/{}",
+                            // replace `jsx_a11y` with `jsx-a11y`, `react_perf` with `react-perf`.
+                            r.plugin_name().cow_replace('_', "-"),
+                            r.name()
+                        )
+                    }
+                });
+
+                SchemaObject {
+                    metadata: Some(Box::new(schemars::schema::Metadata {
+                        description: Some(
+                            "See [Oxlint Rules](https://oxc.rs/docs/guide/usage/linter/rules.html)"
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    })),
+                    instance_type: Some(InstanceType::Object.into()),
+                    object: Some(Box::new(schemars::schema::ObjectValidation {
+                        additional_properties: Some(Box::new(r#gen.subschema_for::<DummyRule>())),
+                        properties: rules_enum
+                            .map(|rule_name| (rule_name, r#gen.subschema_for::<DummyRule>()))
+                            .collect(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }
+                .into()
+            }
+        }
 
         r#gen.subschema_for::<DummyRuleMap>()
     }
