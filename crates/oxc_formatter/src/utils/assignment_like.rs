@@ -847,6 +847,15 @@ impl<'a> Format<'a> for AssignmentLike<'a, '_> {
                         );
                     }
                     AssignmentLikeLayout::BreakAfterOperator => {
+                        // Preserve the original order of trailing line comments after `=`
+                        // by flushing them via `line_suffix_boundary()`.
+                        // Otherwise the line comment gets pushed past the right-hand side,
+                        // changing which token the comment semantically attaches to.
+                        //
+                        // NOTE: Currently scoped to non-conditional `TSTypeAliasDeclaration`.
+                        // Expanding the condition would preserve the order in other nodes too.
+                        // (e.g. `VariableDeclarator`) But for those we follow Prettier's current behavior.
+                        // See also https://github.com/prettier/prettier/issues/14617
                         if matches!(
                             self,
                             AssignmentLike::TSTypeAliasDeclaration(decl)
