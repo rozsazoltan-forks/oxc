@@ -324,6 +324,7 @@ pub use crate::rules::jsx_a11y::no_access_key::NoAccessKey as JsxA11YNoAccessKey
 pub use crate::rules::jsx_a11y::no_aria_hidden_on_focusable::NoAriaHiddenOnFocusable as JsxA11YNoAriaHiddenOnFocusable;
 pub use crate::rules::jsx_a11y::no_autofocus::NoAutofocus as JsxA11YNoAutofocus;
 pub use crate::rules::jsx_a11y::no_distracting_elements::NoDistractingElements as JsxA11YNoDistractingElements;
+pub use crate::rules::jsx_a11y::no_interactive_element_to_noninteractive_role::NoInteractiveElementToNoninteractiveRole as JsxA11YNoInteractiveElementToNoninteractiveRole;
 pub use crate::rules::jsx_a11y::no_noninteractive_element_interactions::NoNoninteractiveElementInteractions as JsxA11YNoNoninteractiveElementInteractions;
 pub use crate::rules::jsx_a11y::no_noninteractive_element_to_interactive_role::NoNoninteractiveElementToInteractiveRole as JsxA11YNoNoninteractiveElementToInteractiveRole;
 pub use crate::rules::jsx_a11y::no_noninteractive_tabindex::NoNoninteractiveTabindex as JsxA11YNoNoninteractiveTabindex;
@@ -1408,6 +1409,9 @@ pub enum RuleEnum {
     JsxA11YNoAriaHiddenOnFocusable(JsxA11YNoAriaHiddenOnFocusable),
     JsxA11YNoAutofocus(JsxA11YNoAutofocus),
     JsxA11YNoDistractingElements(JsxA11YNoDistractingElements),
+    JsxA11YNoInteractiveElementToNoninteractiveRole(
+        JsxA11YNoInteractiveElementToNoninteractiveRole,
+    ),
     JsxA11YNoNoninteractiveElementInteractions(JsxA11YNoNoninteractiveElementInteractions),
     JsxA11YNoNoninteractiveElementToInteractiveRole(
         JsxA11YNoNoninteractiveElementToInteractiveRole,
@@ -2284,8 +2288,10 @@ const JSX_A_11_Y_NO_ACCESS_KEY_ID: usize = JSX_A_11_Y_MOUSE_EVENTS_HAVE_KEY_EVEN
 const JSX_A_11_Y_NO_ARIA_HIDDEN_ON_FOCUSABLE_ID: usize = JSX_A_11_Y_NO_ACCESS_KEY_ID + 1usize;
 const JSX_A_11_Y_NO_AUTOFOCUS_ID: usize = JSX_A_11_Y_NO_ARIA_HIDDEN_ON_FOCUSABLE_ID + 1usize;
 const JSX_A_11_Y_NO_DISTRACTING_ELEMENTS_ID: usize = JSX_A_11_Y_NO_AUTOFOCUS_ID + 1usize;
-const JSX_A_11_Y_NO_NONINTERACTIVE_ELEMENT_INTERACTIONS_ID: usize =
+const JSX_A_11_Y_NO_INTERACTIVE_ELEMENT_TO_NONINTERACTIVE_ROLE_ID: usize =
     JSX_A_11_Y_NO_DISTRACTING_ELEMENTS_ID + 1usize;
+const JSX_A_11_Y_NO_NONINTERACTIVE_ELEMENT_INTERACTIONS_ID: usize =
+    JSX_A_11_Y_NO_INTERACTIVE_ELEMENT_TO_NONINTERACTIVE_ROLE_ID + 1usize;
 const JSX_A_11_Y_NO_NONINTERACTIVE_ELEMENT_TO_INTERACTIVE_ROLE_ID: usize =
     JSX_A_11_Y_NO_NONINTERACTIVE_ELEMENT_INTERACTIONS_ID + 1usize;
 const JSX_A_11_Y_NO_NONINTERACTIVE_TABINDEX_ID: usize =
@@ -3203,6 +3209,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JSX_A_11_Y_NO_ARIA_HIDDEN_ON_FOCUSABLE_ID,
             Self::JsxA11YNoAutofocus(_) => JSX_A_11_Y_NO_AUTOFOCUS_ID,
             Self::JsxA11YNoDistractingElements(_) => JSX_A_11_Y_NO_DISTRACTING_ELEMENTS_ID,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JSX_A_11_Y_NO_INTERACTIVE_ELEMENT_TO_NONINTERACTIVE_ROLE_ID
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JSX_A_11_Y_NO_NONINTERACTIVE_ELEMENT_INTERACTIONS_ID
             }
@@ -4112,6 +4121,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JsxA11YNoAriaHiddenOnFocusable::NAME,
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::NAME,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::NAME,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::NAME
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::NAME
             }
@@ -5057,6 +5069,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JsxA11YNoAriaHiddenOnFocusable::CATEGORY,
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::CATEGORY,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::CATEGORY,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::CATEGORY
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::CATEGORY
             }
@@ -5975,6 +5990,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JsxA11YNoAriaHiddenOnFocusable::FIX,
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::FIX,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::FIX,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::FIX
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::FIX
             }
@@ -7071,6 +7089,9 @@ impl RuleEnum {
             }
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::documentation(),
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::documentation(),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::documentation()
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::documentation()
             }
@@ -9065,6 +9086,10 @@ impl RuleEnum {
                 JsxA11YNoDistractingElements::config_schema(generator)
                     .or_else(|| JsxA11YNoDistractingElements::schema(generator))
             }
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::config_schema(generator)
+                    .or_else(|| JsxA11YNoInteractiveElementToNoninteractiveRole::schema(generator))
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::config_schema(generator)
                     .or_else(|| JsxA11YNoNoninteractiveElementInteractions::schema(generator))
@@ -10202,6 +10227,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => "jsx_a11y",
             Self::JsxA11YNoAutofocus(_) => "jsx_a11y",
             Self::JsxA11YNoDistractingElements(_) => "jsx_a11y",
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => "jsx_a11y",
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => "jsx_a11y",
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(_) => "jsx_a11y",
             Self::JsxA11YNoNoninteractiveTabindex(_) => "jsx_a11y",
@@ -12342,6 +12368,11 @@ impl RuleEnum {
             Self::JsxA11YNoDistractingElements(_) => Ok(Self::JsxA11YNoDistractingElements(
                 JsxA11YNoDistractingElements::from_configuration(value)?,
             )),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                Ok(Self::JsxA11YNoInteractiveElementToNoninteractiveRole(
+                    JsxA11YNoInteractiveElementToNoninteractiveRole::from_configuration(value)?,
+                ))
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 Ok(Self::JsxA11YNoNoninteractiveElementInteractions(
                     JsxA11YNoNoninteractiveElementInteractions::from_configuration(value)?,
@@ -13555,6 +13586,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.to_configuration(),
             Self::JsxA11YNoAutofocus(rule) => rule.to_configuration(),
             Self::JsxA11YNoDistractingElements(rule) => rule.to_configuration(),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.to_configuration(),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.to_configuration(),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.to_configuration(),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.to_configuration(),
@@ -14352,6 +14384,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.run(node, ctx),
             Self::JsxA11YNoAutofocus(rule) => rule.run(node, ctx),
             Self::JsxA11YNoDistractingElements(rule) => rule.run(node, ctx),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.run(node, ctx),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.run(node, ctx),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.run(node, ctx),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.run(node, ctx),
@@ -15147,6 +15180,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.run_once(ctx),
             Self::JsxA11YNoAutofocus(rule) => rule.run_once(ctx),
             Self::JsxA11YNoDistractingElements(rule) => rule.run_once(ctx),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.run_once(ctx),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.run_once(ctx),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.run_once(ctx),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.run_once(ctx),
@@ -16042,6 +16076,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.run_on_jest_node(jest_node, ctx),
             Self::JsxA11YNoAutofocus(rule) => rule.run_on_jest_node(jest_node, ctx),
             Self::JsxA11YNoDistractingElements(rule) => rule.run_on_jest_node(jest_node, ctx),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => {
+                rule.run_on_jest_node(jest_node, ctx)
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => {
                 rule.run_on_jest_node(jest_node, ctx)
             }
@@ -16849,6 +16886,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.should_run(ctx),
             Self::JsxA11YNoAutofocus(rule) => rule.should_run(ctx),
             Self::JsxA11YNoDistractingElements(rule) => rule.should_run(ctx),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.should_run(ctx),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.should_run(ctx),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.should_run(ctx),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.should_run(ctx),
@@ -17932,6 +17970,9 @@ impl RuleEnum {
             }
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::IS_TSGOLINT_RULE,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::IS_TSGOLINT_RULE,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::IS_TSGOLINT_RULE
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::IS_TSGOLINT_RULE
             }
@@ -18927,6 +18968,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JsxA11YNoAriaHiddenOnFocusable::VERSION,
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::VERSION,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::VERSION,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::VERSION
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::VERSION
             }
@@ -19917,6 +19961,9 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(_) => JsxA11YNoAriaHiddenOnFocusable::HAS_CONFIG,
             Self::JsxA11YNoAutofocus(_) => JsxA11YNoAutofocus::HAS_CONFIG,
             Self::JsxA11YNoDistractingElements(_) => JsxA11YNoDistractingElements::HAS_CONFIG,
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(_) => {
+                JsxA11YNoInteractiveElementToNoninteractiveRole::HAS_CONFIG
+            }
             Self::JsxA11YNoNoninteractiveElementInteractions(_) => {
                 JsxA11YNoNoninteractiveElementInteractions::HAS_CONFIG
             }
@@ -20744,6 +20791,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.types_info(),
             Self::JsxA11YNoAutofocus(rule) => rule.types_info(),
             Self::JsxA11YNoDistractingElements(rule) => rule.types_info(),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.types_info(),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.types_info(),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.types_info(),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.types_info(),
@@ -21539,6 +21587,7 @@ impl RuleEnum {
             Self::JsxA11YNoAriaHiddenOnFocusable(rule) => rule.run_info(),
             Self::JsxA11YNoAutofocus(rule) => rule.run_info(),
             Self::JsxA11YNoDistractingElements(rule) => rule.run_info(),
+            Self::JsxA11YNoInteractiveElementToNoninteractiveRole(rule) => rule.run_info(),
             Self::JsxA11YNoNoninteractiveElementInteractions(rule) => rule.run_info(),
             Self::JsxA11YNoNoninteractiveElementToInteractiveRole(rule) => rule.run_info(),
             Self::JsxA11YNoNoninteractiveTabindex(rule) => rule.run_info(),
@@ -22452,6 +22501,9 @@ pub static RULES: std::sync::LazyLock<Vec<RuleEnum>> = std::sync::LazyLock::new(
         RuleEnum::JsxA11YNoAriaHiddenOnFocusable(JsxA11YNoAriaHiddenOnFocusable::default()),
         RuleEnum::JsxA11YNoAutofocus(JsxA11YNoAutofocus::default()),
         RuleEnum::JsxA11YNoDistractingElements(JsxA11YNoDistractingElements::default()),
+        RuleEnum::JsxA11YNoInteractiveElementToNoninteractiveRole(
+            JsxA11YNoInteractiveElementToNoninteractiveRole::default(),
+        ),
         RuleEnum::JsxA11YNoNoninteractiveElementInteractions(
             JsxA11YNoNoninteractiveElementInteractions::default(),
         ),
