@@ -752,6 +752,7 @@ export interface DummyRuleMap {
   "no-func-assign"?: DummyRule;
   "no-global-assign"?: DummyRule;
   "no-implicit-coercion"?: DummyRule;
+  "no-implicit-globals"?: DummyRule;
   "no-import-assign"?: DummyRule;
   "no-inline-comments"?: DummyRule;
   "no-inner-declarations"?: DummyRule;

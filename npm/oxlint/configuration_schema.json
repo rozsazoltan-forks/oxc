@@ -967,6 +967,9 @@
         "no-implicit-coercion": {
           "$ref": "#/definitions/DummyRule"
         },
+        "no-implicit-globals": {
+          "$ref": "#/definitions/DummyRule"
+        },
         "no-import-assign": {
           "$ref": "#/definitions/DummyRule"
         },
