@@ -634,8 +634,7 @@ impl<'a> ObjectRestSpread<'a> {
                 let Statement::BlockStatement(block) = body else {
                     unreachable!();
                 };
-                let mut bound_names = vec![];
-                declarator.id.bound_names(&mut |ident| bound_names.push(ident.clone()));
+                let bound_symbol_ids = declarator.id.get_symbol_ids();
                 Self::replace_rest_element(
                     declarator.kind,
                     &mut declarator.id,
@@ -644,12 +643,8 @@ impl<'a> ObjectRestSpread<'a> {
                     ctx,
                 );
                 // Move the bindings from the for init scope to scope of the loop body.
-                for ident in bound_names {
-                    ctx.scoping_mut().move_binding_by_symbol_id(
-                        scope_id,
-                        new_scope_id,
-                        ident.symbol_id(),
-                    );
+                for symbol_id in bound_symbol_ids {
+                    ctx.scoping_mut().move_binding_by_symbol_id(scope_id, new_scope_id, symbol_id);
                 }
             }
         }
