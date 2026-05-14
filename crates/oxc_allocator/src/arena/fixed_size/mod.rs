@@ -46,6 +46,10 @@ const _: () = {
 
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::dealloc_fixed_size_arena_chunk;
 
 #[cfg(not(target_os = "windows"))]
 mod unix;
+#[cfg(not(target_os = "windows"))]
+pub use unix::dealloc_fixed_size_arena_chunk;

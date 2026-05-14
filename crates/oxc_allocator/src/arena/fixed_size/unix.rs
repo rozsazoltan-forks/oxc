@@ -5,7 +5,7 @@ use std::{
 
 use crate::generated::fixed_size_constants::{BLOCK_ALIGN, BLOCK_SIZE};
 
-use super::super::Arena;
+use super::super::{Arena, ChunkFooter};
 
 // System allocator on Mac OS refuses allocations with 4 GiB alignment, so we over-allocate
 // `BLOCK_SIZE + TWO_GIB` (4 GiB - 16) bytes with 2 GiB alignment, and then use either the 1st or 2nd half
@@ -83,4 +83,33 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
 
         Some(arena)
     }
+}
+
+/// Deallocate the chunk whose footer is pointed to by `footer_ptr`, when the chunk is fixed size
+/// (created via `Arena::from_raw_parts` or `Arena::new_fixed_size`).
+///
+/// `dealloc_chunk` in `drop` module delegates to this function when chunk's `is_fixed_size` flag is set.
+/// `free_fixed_size_allocator` in `pool/fixed_size.rs` also uses this function for deallocation.
+///
+/// # SAFETY
+///
+/// * `footer_ptr` must point to a valid `ChunkFooter`.
+/// * `ChunkFooter` must be for a fixed size chunk (created via `Arena::from_raw_parts` or `Arena::new_fixed_size`).
+pub unsafe fn dealloc_fixed_size_arena_chunk(footer_ptr: NonNull<ChunkFooter>) {
+    // Create `&ChunkFooter` reference within a block, to ensure the reference is not live
+    // when we deallocate the chunk's memory (which includes the `ChunkFooter`)
+    let (backing_alloc_ptr, layout, is_fixed_size) = {
+        // SAFETY: Caller guarantees that `footer_ptr` points to a valid `ChunkFooter`
+        let footer = unsafe { footer_ptr.as_ref() };
+        (footer.backing_alloc_ptr, footer.layout, footer.is_fixed_size)
+    };
+
+    debug_assert!(
+        is_fixed_size,
+        "Only fixed-size allocators should be passed to `dealloc_fixed_size_arena_chunk` to deallocate"
+    );
+
+    // SAFETY: Each `ChunkFooter`'s `backing_alloc_ptr` and `layout` describe its backing allocation.
+    // Caller guarantees `is_fixed_size` is `true`, so backing allocation was made via `System` allocator.
+    unsafe { System.dealloc(backing_alloc_ptr.as_ptr(), layout) };
 }
