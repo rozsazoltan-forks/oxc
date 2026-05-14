@@ -335,6 +335,36 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
             // SAFETY: `footer_ptr` always points to a valid `ChunkFooter`
             let footer = unsafe { footer_ptr.as_ref() };
             if footer.is_fixed_size {
+                // Attempt to grow the chunk in place to accommodate the allocation
+                #[cfg(all(
+                    feature = "fixed_size",
+                    target_pointer_width = "64",
+                    target_endian = "little"
+                ))]
+                {
+                    // SAFETY: Allocating `layout` within current chunk is not possible.
+                    // If it was, then `try_alloc_layout_fast` would have succeeded,
+                    // and this method wouldn't have been called.
+                    // `is_fixed_size` is `true`, so it's a fixed-size chunk.
+                    let new_ptr = unsafe { self.grow_fixed_size_chunk(layout) };
+                    if let Some(new_ptr) = new_ptr {
+                        debug_assert!(new_ptr >= self.start_ptr.get());
+                        debug_assert!(new_ptr < self.cursor_ptr.get());
+                        debug_assert!(
+                            self.cursor_ptr.get().addr().get() - new_ptr.addr().get()
+                                >= layout.size()
+                        );
+                        debug_assert!(is_pointer_aligned_to(new_ptr, layout.align()));
+                        debug_assert!(is_pointer_aligned_to(new_ptr, MIN_ALIGN));
+
+                        // Update cursor and return pointer where `layout` can be allocated
+                        self.cursor_ptr.set(new_ptr);
+                        return Some(new_ptr);
+                    }
+                }
+
+                // Could not grow the chunk in place enough to accommodate allocating `layout`.
+                // Fixed-size arenas cannot add more chunks, so allocation fails.
                 return None;
             }
         }

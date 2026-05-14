@@ -83,6 +83,42 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
 
         Some(arena)
     }
+
+    /// Attempt to grow the [`Arena`]'s current chunk in place to accommodate an allocation of `Layout`.
+    ///
+    /// If the chunk can be grown in place to accommodate the request:
+    /// * Returns `Some(new_ptr)`, where `new_ptr` is the pointer to write the layout at.
+    /// * Updates `start_ptr`.
+    /// * Does NOT update `cursor_ptr` - that is left to the caller.
+    ///
+    /// If the chunk could not be grown in place to accommodate the request, returns `None`.
+    ///
+    /// On Linux and Mac OS, fixed size chunks cannot currently be grown in place, so always returns `None`.
+    ///
+    /// # SAFETY
+    ///
+    /// * `Arena` must be fixed-size (created via `Arena::new_fixed_size`).
+    /// * Arena must not be able to accommodate an allocation of `layout` within current chunk, prior to growing it.
+    #[expect(unused_variables)]
+    #[cfg_attr(not(debug_assertions), expect(clippy::unused_self))]
+    #[inline(always)] // Because it's a no-op
+    pub(in super::super) unsafe fn grow_fixed_size_chunk(
+        &self,
+        layout: Layout,
+    ) -> Option<NonNull<u8>> {
+        #[cfg(debug_assertions)]
+        {
+            let footer_ptr = self.current_chunk_footer_ptr.get().expect("Arena has no chunks");
+            // SAFETY: `footer_ptr` always points to a valid `ChunkFooter`
+            let footer = unsafe { footer_ptr.as_ref() };
+            assert!(
+                footer.is_fixed_size,
+                "Only fixed-size allocators should be passed to `Arena::grow_fixed_size_chunk`"
+            );
+        }
+
+        None
+    }
 }
 
 /// Deallocate the chunk whose footer is pointed to by `footer_ptr`, when the chunk is fixed size
