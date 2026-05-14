@@ -89,7 +89,6 @@ impl<'a> Traverse<'a, TransformState<'a>> for ExplicitResourceManagement<'a> {
             variable_declarator.id.get_binding_identifier().unwrap();
 
         let for_of_init_symbol_id = variable_declarator_binding_ident.symbol_id();
-        let for_of_init_name = variable_declarator_binding_ident.name;
 
         let temp_id = ctx.generate_uid_based_on_node(
             variable_declarator.id.get_binding_identifier().unwrap(),
@@ -123,8 +122,11 @@ impl<'a> Traverse<'a, TransformState<'a>> for ExplicitResourceManagement<'a> {
                 ScopeFlags::empty(),
             ),
         };
-        ctx.scoping_mut().set_symbol_scope_id(for_of_init_symbol_id, scope_id);
-        ctx.scoping_mut().move_binding(for_of_stmt_scope_id, scope_id, for_of_init_name);
+        ctx.scoping_mut().move_binding_by_symbol_id(
+            for_of_stmt_scope_id,
+            scope_id,
+            for_of_init_symbol_id,
+        );
 
         if let Statement::BlockStatement(body) = &mut for_of_stmt.body {
             // `for (const _x of y) { x(); }` -> `for (const _x of y) { using x = _x; x(); }`
@@ -169,8 +171,11 @@ impl<'a> Traverse<'a, TransformState<'a>> for ExplicitResourceManagement<'a> {
                 ScopeFlags::ClassStaticBlock,
             );
 
-            ctx.scoping_mut().set_symbol_scope_id(using_ctx.symbol_id, static_block_new_scope_id);
-            ctx.scoping_mut().move_binding(scope_id, static_block_new_scope_id, using_ctx.name);
+            ctx.scoping_mut().move_binding_by_symbol_id(
+                scope_id,
+                static_block_new_scope_id,
+                using_ctx.symbol_id,
+            );
             *ctx.scoping_mut().scope_flags_mut(scope_id) = ScopeFlags::StrictMode;
 
             block.set_scope_id(static_block_new_scope_id);
@@ -287,8 +292,11 @@ impl<'a> Traverse<'a, TransformState<'a>> for ExplicitResourceManagement<'a> {
 
             let current_hoist_scope_id = ctx.current_hoist_scope_id();
             node.block.set_scope_id(block_stmt_scope_id);
-            ctx.scoping_mut().set_symbol_scope_id(using_ctx.symbol_id, current_hoist_scope_id);
-            ctx.scoping_mut().move_binding(scope_id, current_hoist_scope_id, using_ctx.name);
+            ctx.scoping_mut().move_binding_by_symbol_id(
+                scope_id,
+                current_hoist_scope_id,
+                using_ctx.symbol_id,
+            );
 
             ctx.scoping_mut().change_scope_parent_id(scope_id, Some(block_stmt_scope_id));
         }
