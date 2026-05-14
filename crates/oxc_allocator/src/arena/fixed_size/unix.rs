@@ -12,6 +12,16 @@ use super::super::Arena;
 // of the allocation, one of which is guaranteed to be on a 4 GiB boundary.
 // <https://github.com/rust-lang/rust/blob/556d20a834126d2d0ac20743b9792b8474d6d03c/library/std/src/sys/alloc/unix.rs#L16-L27>
 // <https://github.com/rust-lang/rust/issues/30170>
+//
+// On Linux MUSL, allocation requests with 4 GiB alignment succeed, but then produce a segfault when the allocation
+// is freed. So we use the same trick as on Mac OS - over-allocate with 2 GiB alignment.
+// <https://github.com/oxc-project/oxc/issues/22339>
+// <https://www.openwall.com/lists/musl/2026/05/12/>
+//
+// On Linux GLIBC, allocation requests with 4 GiB alignment work correctly, so we could request exactly what we need.
+// But it makes little difference in practice - because all allocations are aligned on 4 GiB, the effective limit
+// on number of fixed-size arenas is the same either way.
+// For simplicity, we just use the same allocation strategy on all Linux variants.
 
 const TWO_GIB: usize = 1 << 31;
 const FOUR_GIB: usize = 1 << 32;
