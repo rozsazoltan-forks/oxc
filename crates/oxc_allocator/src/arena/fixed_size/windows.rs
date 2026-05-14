@@ -367,17 +367,9 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
         // 1. The request is too large to fit, even with the whole Container fully committed.
         // 2. The Container is already fully committed (`chunk_start_addr == container_start_addr`).
         // 3. The arena was created via `Arena::from_raw_parts` from an externally-managed buffer
-        //    (e.g. Oxlint's raw transfer parser used in `RuleTester`), which creates Arena with `start_ptr`
-        //    at start of Container. Same logic as the fully-committed case. We must not `VirtualAlloc(MEM_COMMIT)`
-        //    on these - the backing memory wasn't reserved via `VirtualAlloc`.
-        //
-        // Note: `napi/parser` creates an `Arena` with `Arena::from_raw_parts`, so with `is_fixed_size: true`.
-        // But it *doesn't* have `start_ptr` aligned on `CONTAINER_ALIGN`. In extreme cases, this could allow this check
-        // to pass when it shouldn't, and attempt to commit memory which wasn't reserved via `VirtualAlloc`.
-        // However, `napi/parser` doesn't enable `fixed_size` Cargo feature, so this code is not compiled,
-        // and therefore there's no way for this failure to arise.
-        // TODO: This is fragile. Fix it by aligning `start_ptr` to `CONTAINER_ALIGN` in `napi/parser`
-        // (write source text into end of buffer, not start).
+        //    (e.g. NAPI parser with raw transfer enabled), which creates Arena with `start_ptr` at start of Container.
+        //    Same logic as the fully-committed case. We must not `VirtualAlloc(MEM_COMMIT)` on these -
+        //    the backing memory wasn't reserved via `VirtualAlloc`.
         if new_ptr.addr().wrapping_sub(container_start_addr) > isize::MAX as usize {
             return None;
         }

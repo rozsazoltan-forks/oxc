@@ -338,20 +338,12 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
             if footer.is_fixed_size {
                 // Attempt to grow the chunk in place to accommodate the allocation.
                 //
-                // `fixed_size` feature is only enabled in Oxlint.
-                // * In Oxlint itself, `grow_fixed_size_chunk` will attempt to grow the chunk in place.
-                // * In Oxlint's `RuleTester`, `Arena`s have `is_fixed_size: true`, but `start_ptr` is aligned on 4 GiB,
-                //   so `grow_fixed_size_chunk` will always fail to grow the chunk, and will return `None`.
-                // * In `napi/parser` with raw transfer enabled, `Arena`s also have `is_fixed_size: true`.
-                //   `start_ptr` is *not* aligned on 4 GiB, so calling `grow_fixed_size_chunk` would be UB.
-                //   (on Windows it would attempt to call `VirtualAlloc` with a pointer which was part of an allocation
-                //   made by JS runtime, not `VirtualAlloc`).
-                //   But `napi/parser` does not enable `fixed_size` Cargo feature, so this whole block is skipped,
-                //   and this function returns `None`.
-                //
-                // This is all rather fragile. It will be improved in future, by moving Oxlint `RuleTester`
-                // and `napi/parser` over to creating backing allocations for `Arena`s via `Arena::new_fixed_size`,
-                // so then all usage will follow the same path.
+                // `is_fixed_size` can only be `true` in 3 circumstances:
+                // * Oxlint: `grow_fixed_size_chunk` will attempt to grow the chunk in place.
+                // * NAPI parser raw transfer: `start_ptr` is aligned on 4 GiB, so `grow_fixed_size_chunk`
+                //   considers the container already grown to maximum size, will always fail to grow the chunk,
+                //   and returns `None`.
+                // * Oxlint's `RuleTester`: Same as NAPI parser raw transfer.
                 #[cfg(all(
                     feature = "fixed_size",
                     target_pointer_width = "64",
