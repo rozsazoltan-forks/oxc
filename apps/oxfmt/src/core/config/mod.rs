@@ -1,33 +1,33 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+mod editorconfig;
+#[cfg(feature = "napi")]
+mod js_config;
+mod nested;
+mod overrides;
 
-use editorconfig_parser::{
-    EditorConfig, EditorConfigProperties, EditorConfigProperty, EndOfLine, IndentStyle,
-    MaxLineLength, QuoteType,
-};
+pub use editorconfig::resolve_editorconfig_path;
+#[cfg(feature = "napi")]
+pub use js_config::{JsConfigLoaderCb, JsLoadJsConfigCb, create_js_config_loader};
+pub use nested::NestedConfigCtx;
+
+use std::path::{Path, PathBuf};
+
+use editorconfig_parser::EditorConfig;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use rustc_hash::FxHashMap;
 use serde_json::Value;
 use tracing::instrument;
 
-use oxc_config::{
-    ConfigConflict, ConfigDiscovery, ConfigFileNames, DiscoveredConfigFile, GlobSet,
-    is_js_config_path,
-};
+use oxc_config::{ConfigDiscovery, ConfigFileNames, DiscoveredConfigFile, is_js_config_path};
 #[cfg(feature = "napi")]
 use oxc_formatter::FormatOptions;
 
-#[cfg(feature = "napi")]
-use super::js_config::JsConfigLoaderCb;
+use self::{
+    editorconfig::{apply_editorconfig, has_editorconfig_overrides, load_editorconfig},
+    overrides::OxfmtrcOverrides,
+};
 use super::{
     FormatStrategy,
     options::to_oxc_formatter,
-    oxfmtrc::{EndOfLineConfig, FormatConfig, OxfmtOverrideConfig, Oxfmtrc},
+    oxfmtrc::{FormatConfig, Oxfmtrc},
     support::FileKind,
     utils,
 };
@@ -46,220 +46,12 @@ pub fn config_discovery() -> ConfigDiscovery {
     )
 }
 
-/// Find the unique config file directly inside `dir` using a single `read_dir`.
-///
-/// Unlike `ConfigDiscovery::find_unique_config_in_directory` which calls
-/// `is_file()` per candidate name, this issues one `read_dir` and matches
-/// entry names — no extra `stat` syscalls.
-///
-/// Only regular files are considered: directories and symlinks (regardless of
-/// target) are skipped. This matches the walker's `follow_links(false)`
-/// behavior so config discovery and file traversal stay consistent.
-///
-/// Returns `Ok(None)` when `dir` is unreadable; the caller can decide whether
-/// that warrants a diagnostic.
-pub fn find_unique_config_by_readdir(
-    dir: &Path,
-) -> Result<Option<DiscoveredConfigFile>, ConfigConflict> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(None);
-    };
-
-    let discovery = config_discovery();
-    // Cache the supported names once; the iteration body needs only name comparison.
-    let config_names = discovery.config_file_names();
-    let mut matches = Vec::new();
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !config_names.iter().any(|n| name == *n) {
-            continue;
-        }
-
-        let Ok(file_type) = entry.file_type() else { continue };
-        // Intentional: skip directories, symlinks, sockets, ... — only
-        // regular files are considered configs (matches walker's
-        // `follow_links(false)`).
-        #[expect(clippy::filetype_is_file)]
-        if !file_type.is_file() {
-            continue;
-        }
-
-        if let Some(config) = discovery.discover_config_file(&entry.path()) {
-            matches.push(config);
-        }
-    }
-
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.into_iter().next()),
-        _ => Err(ConfigConflict::new(dir.to_path_buf(), matches)),
-    }
-}
-
-// ---
-
-// Shared on-demand nested-config detection infrastructure.
-//
-// State is centralized in `NestedConfigCtx` so Phase 2 (direct file targets),
-// Phase 3 (parallel walk), and the stdin path all share one cache (each load
-// runs at most once walk-wide) and one signal (`any_config_found`).
-
-/// Result of loading a direct config in a single directory.
-type ConfigLoadResult = Result<Option<Arc<ConfigResolver>>, String>;
-
-/// Walk-wide shared cache for direct-config loads.
-///
-/// Each entry's `OnceLock` ensures the underlying load runs at most once per
-/// directory across all visitors and across phases.
-type ConfigLoadCache = Arc<Mutex<FxHashMap<PathBuf, Arc<OnceLock<ConfigLoadResult>>>>>;
-
-/// Walk-wide shared map of "directory has a direct config" entries.
-///
-/// **Lock discipline**: never hold this lock across a `ConfigLoadCache` load.
-/// Acquire the read/write lock, do the lookup or insert, release immediately.
-type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
-
-/// Shared nested-config detection context: cached `ConfigDiscovery` + load
-/// cache + scope map + loader inputs (`editorconfig_path`, `js_config_loader`)
-/// + the `any_config_found` signal.
-///
-/// Cloning is shallow (each field is already `Arc` / `Copy`).
-#[derive(Clone)]
-pub struct NestedConfigCtx {
-    discovery: ConfigDiscovery,
-    editorconfig_path: Option<Arc<Path>>,
-    #[cfg(feature = "napi")]
-    js_config_loader: Option<JsConfigLoaderCb>,
-    any_config_found: Arc<AtomicBool>,
-    scope_by_dir: ScopeByDir,
-    config_load_cache: ConfigLoadCache,
-}
-
-impl NestedConfigCtx {
-    pub fn new(
-        editorconfig_path: Option<Arc<Path>>,
-        #[cfg(feature = "napi")] js_config_loader: Option<JsConfigLoaderCb>,
-    ) -> Self {
-        Self {
-            discovery: config_discovery(),
-            editorconfig_path,
-            #[cfg(feature = "napi")]
-            js_config_loader,
-            any_config_found: Arc::new(AtomicBool::new(false)),
-            scope_by_dir: Arc::new(RwLock::new(FxHashMap::default())),
-            config_load_cache: Arc::new(Mutex::new(FxHashMap::default())),
-        }
-    }
-
-    /// Returns `true` if `path`'s file name matches a supported config file.
-    pub fn is_config_file(&self, path: &Path) -> bool {
-        self.discovery.discover_config_file(path).is_some()
-    }
-
-    /// Look up a registered scope for `dir` without probing.
-    pub fn lookup_scope(&self, dir: &Path) -> Option<Arc<ConfigResolver>> {
-        self.scope_by_dir.read().expect("scope_by_dir rwlock poisoned").get(dir).cloned()
-    }
-
-    pub fn config_found(&self) -> bool {
-        self.any_config_found.load(Ordering::Relaxed)
-    }
-
-    /// Read `scope_by_dir` for `dir`; on miss, probe via the load cache and
-    /// register the result.
-    ///
-    /// Returns:
-    /// - `Ok(Some(_))` — `dir` has a direct config (registered).
-    /// - `Ok(None)` — `dir` has no direct config, or Vite+ `.fmt` missing.
-    /// - `Err(_)` — load / parse / validate failure.
-    ///
-    /// On a successful load, the `any_config_found` signal is set and the
-    /// resolver is inserted into `scope_by_dir` (only the first writer wins).
-    pub fn probe_dir(&self, dir: &Path) -> Result<Option<Arc<ConfigResolver>>, String> {
-        if let Some(hit) = self.lookup_scope(dir) {
-            return Ok(Some(hit));
-        }
-
-        match self.get_or_load_direct_config(dir)? {
-            Some(loaded) => {
-                self.any_config_found.store(true, Ordering::Relaxed);
-                let mut guard = self.scope_by_dir.write().expect("scope_by_dir rwlock poisoned");
-                guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::clone(&loaded));
-                Ok(Some(loaded))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Get-or-compute the direct-config load result for `dir`, dedupe walk-wide.
-    ///
-    /// `OnceLock::get_or_init` blocks concurrent callers for the same `dir`
-    /// until the first init completes. `Ok(Some(_))` / `Ok(None)` / `Err(_)`
-    /// are all cached, so broken configs are not retried and "no config in
-    /// this dir" lookups stay O(1).
-    fn get_or_load_direct_config(&self, dir: &Path) -> ConfigLoadResult {
-        // Acquire (or insert) the cell, then drop the outer mutex immediately.
-        let cell = {
-            let mut guard =
-                self.config_load_cache.lock().expect("config_load_cache mutex poisoned");
-            let entry = guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::new(OnceLock::new()));
-            Arc::clone(entry)
-        };
-
-        cell.get_or_init(|| {
-            load_direct_config_in_dir(
-                dir,
-                self.editorconfig_path.as_deref(),
-                #[cfg(feature = "napi")]
-                self.js_config_loader.as_ref(),
-            )
-        })
-        .clone()
-    }
-}
-
-/// Load and validate a config file located **directly** inside `dir`.
-///
-/// Returns `Ok(None)` when `dir` has no supported config file, or when a
-/// `vite.config.ts` is present but lacks a `.fmt` field (Vite+ mode). This
-/// matches `discover_config`'s "skip and continue" semantics applied at a
-/// single-dir scope.
-fn load_direct_config_in_dir(
-    dir: &Path,
-    editorconfig_path: Option<&Path>,
-    #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
-) -> Result<Option<Arc<ConfigResolver>>, String> {
-    let Some(config_file) = find_unique_config_by_readdir(dir)
-        .map_err(|e| Into::<oxc_diagnostics::OxcDiagnostic>::into(e).to_string())?
-    else {
-        return Ok(None);
-    };
-
-    let editorconfig = load_editorconfig(dir, editorconfig_path)?;
-    let load_err = |err: String| format!("Failed to load config in {}: {err}", dir.display());
-
-    let Some(mut resolver) = build_resolver_from_discovered(
-        config_file,
-        editorconfig,
-        #[cfg(feature = "napi")]
-        js_config_loader,
-    )
-    .map_err(load_err)?
-    else {
-        return Ok(None);
-    };
-
-    resolver.build_and_validate().map_err(load_err)?;
-    Ok(Some(Arc::new(resolver)))
-}
-
 /// Build a `ConfigResolver` from a single discovered config file (no ancestor walk,
 /// no `build_and_validate`).
 ///
 /// Returns `Ok(None)` for the Vite+ "missing `.fmt`" case so callers can decide
 /// whether to skip-and-continue (ancestor walk) or treat it as "no config in this dir".
-fn build_resolver_from_discovered(
+pub fn build_resolver_from_discovered(
     config_file: DiscoveredConfigFile,
     editorconfig: Option<EditorConfig>,
     #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
@@ -305,11 +97,6 @@ fn build_resolver_from_discovered(
             )))
         }
     }
-}
-
-pub fn resolve_editorconfig_path(cwd: &Path) -> Option<PathBuf> {
-    // Search the nearest `.editorconfig` from cwd upwards
-    cwd.ancestors().map(|dir| dir.join(".editorconfig")).find(|p| p.exists())
 }
 
 // ---
@@ -747,200 +534,6 @@ fn build_ignore_glob(
     }
     let gitignore = builder.build().map_err(|_| "Failed to build ignores".to_string())?;
     Ok(Some(gitignore))
-}
-
-// ---
-
-/// Resolved overrides from `.oxfmtrc` for file-specific matching.
-/// Similar to `EditorConfig`, this handles `FormatConfig` override resolution.
-#[derive(Debug)]
-struct OxfmtrcOverrides {
-    base_dir: Option<PathBuf>,
-    entries: Vec<OxfmtrcOverrideEntry>,
-}
-
-impl OxfmtrcOverrides {
-    fn new(overrides: Vec<OxfmtOverrideConfig>, base_dir: Option<PathBuf>) -> Self {
-        Self {
-            base_dir,
-            entries: overrides
-                .into_iter()
-                .map(|o| OxfmtrcOverrideEntry {
-                    files: o.files,
-                    exclude_files: o.exclude_files,
-                    options: o.options,
-                })
-                .collect(),
-        }
-    }
-
-    /// Check if any overrides exist that match the given path.
-    fn has_match(&self, path: &Path) -> bool {
-        let relative = self.relative_path(path);
-        self.entries.iter().any(|e| Self::is_entry_match(e, &relative))
-    }
-
-    /// Get all matching override options for a given path.
-    fn get_matching(&self, path: &Path) -> impl Iterator<Item = &FormatConfig> + '_ {
-        let relative = self.relative_path(path);
-        self.entries.iter().filter(move |e| Self::is_entry_match(e, &relative)).map(|e| &e.options)
-    }
-
-    /// NOTE: On Windows, `to_string_lossy()` produces `\`-separated paths.
-    /// This is OK since `fast_glob::glob_match()` supports both `/` and `\` via `std::path::is_separator`.
-    fn relative_path(&self, path: &Path) -> String {
-        self.base_dir
-            .as_ref()
-            .and_then(|dir| path.strip_prefix(dir).ok())
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned()
-    }
-
-    fn is_entry_match(entry: &OxfmtrcOverrideEntry, relative: &str) -> bool {
-        entry.files.is_match(relative) && !entry.exclude_files.is_match(relative)
-    }
-}
-
-/// A single override entry with normalized glob patterns.
-/// NOTE: Written path patterns are glob patterns; use `/` as the path separator on all platforms.
-#[derive(Debug)]
-struct OxfmtrcOverrideEntry {
-    files: GlobSet,
-    exclude_files: GlobSet,
-    options: FormatConfig,
-}
-
-// ---
-
-/// Load `.editorconfig` from a path if provided.
-fn load_editorconfig(
-    cwd: &Path,
-    editorconfig_path: Option<&Path>,
-) -> Result<Option<EditorConfig>, String> {
-    match editorconfig_path {
-        Some(path) => {
-            let str = utils::read_to_string(path)
-                .map_err(|_| format!("Failed to read {}: File not found", path.display()))?;
-
-            // Use the directory containing `.editorconfig` as the base, not the CLI's cwd.
-            // This ensures patterns like `[src/*.ts]` are resolved relative to where `.editorconfig` is located.
-            Ok(Some(EditorConfig::parse(&str).with_cwd(path.parent().unwrap_or(cwd))))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Check if `.editorconfig` has per-file overrides for this path.
-///
-/// Returns `true` if the resolved properties differ from the root `[*]` section.
-///
-/// Currently, only the following properties are considered for overrides:
-/// - max_line_length
-/// - end_of_line
-/// - indent_style
-/// - indent_size
-/// - tab_width
-/// - insert_final_newline
-/// - quote_type
-fn has_editorconfig_overrides(editorconfig: &EditorConfig, path: &Path) -> bool {
-    let sections = editorconfig.sections();
-
-    // No sections, or only root `[*]` section → no overrides
-    if sections.is_empty() || matches!(sections, [s] if s.name == "*") {
-        return false;
-    }
-
-    let resolved = editorconfig.resolve(path);
-
-    // Get the root `[*]` section properties
-    let root_props = sections.iter().find(|s| s.name == "*").map(|s| &s.properties);
-
-    // Compare only the properties we care about
-    match root_props {
-        Some(root) => {
-            resolved.max_line_length != root.max_line_length
-                || resolved.end_of_line != root.end_of_line
-                || resolved.indent_style != root.indent_style
-                || resolved.indent_size != root.indent_size
-                || resolved.tab_width != root.tab_width
-                || resolved.insert_final_newline != root.insert_final_newline
-                || resolved.quote_type != root.quote_type
-        }
-        // No `[*]` section means any resolved property is an override
-        None => {
-            resolved.max_line_length != EditorConfigProperty::Unset
-                || resolved.end_of_line != EditorConfigProperty::Unset
-                || resolved.indent_style != EditorConfigProperty::Unset
-                || resolved.indent_size != EditorConfigProperty::Unset
-                || resolved.tab_width != EditorConfigProperty::Unset
-                || resolved.insert_final_newline != EditorConfigProperty::Unset
-                || resolved.quote_type != EditorConfigProperty::Unset
-        }
-    }
-}
-
-/// Apply `.editorconfig` properties to `FormatConfig`.
-///
-/// Only applies values that are not already set in the user's config.
-/// NOTE: Only properties checked by [`has_editorconfig_overrides`] are applied here.
-fn apply_editorconfig(config: &mut FormatConfig, props: &EditorConfigProperties) {
-    #[expect(clippy::cast_possible_truncation)]
-    if config.print_width.is_none()
-        && let EditorConfigProperty::Value(MaxLineLength::Number(v)) = props.max_line_length
-    {
-        config.print_width = Some(v as u16);
-    }
-
-    if config.end_of_line.is_none()
-        && let EditorConfigProperty::Value(eol) = props.end_of_line
-    {
-        config.end_of_line = Some(match eol {
-            EndOfLine::Lf => EndOfLineConfig::Lf,
-            EndOfLine::Cr => EndOfLineConfig::Cr,
-            EndOfLine::Crlf => EndOfLineConfig::Crlf,
-        });
-    }
-
-    if config.use_tabs.is_none()
-        && let EditorConfigProperty::Value(style) = props.indent_style
-    {
-        config.use_tabs = Some(match style {
-            IndentStyle::Tab => true,
-            IndentStyle::Space => false,
-        });
-    }
-
-    if config.tab_width.is_none() {
-        // Match Prettier's behavior: Only use `indent_size` when `useTabs: false`.
-        // https://github.com/prettier/prettier/blob/90983f40dce5e20beea4e5618b5e0426a6a7f4f0/src/config/editorconfig/editorconfig-to-prettier.js#L25-L30
-        #[expect(clippy::cast_possible_truncation)]
-        if config.use_tabs == Some(false)
-            && let EditorConfigProperty::Value(size) = props.indent_size
-        {
-            config.tab_width = Some(size as u8);
-        } else if let EditorConfigProperty::Value(size) = props.tab_width {
-            config.tab_width = Some(size as u8);
-        }
-    }
-
-    if config.insert_final_newline.is_none()
-        && let EditorConfigProperty::Value(v) = props.insert_final_newline
-    {
-        config.insert_final_newline = Some(v);
-    }
-
-    if config.single_quote.is_none() {
-        match props.quote_type {
-            EditorConfigProperty::Value(QuoteType::Single) => {
-                config.single_quote = Some(true);
-            }
-            EditorConfigProperty::Value(QuoteType::Double) => {
-                config.single_quote = Some(false);
-            }
-            _ => {}
-        }
-    }
 }
 
 // ---
