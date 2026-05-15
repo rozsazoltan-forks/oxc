@@ -552,13 +552,21 @@ impl WalkVisitor {
         }
 
         // Phase 2: race-rescue probe across `visited`, closer-first.
+        //
+        // On a hit at `visited[i]`, entries `visited[i+1..]` were never probed
+        // and sit ABOVE the closer dir in the ancestor chain — they do NOT
+        // share the closer's scope. Truncate `visited` to drop them so the
+        // negative cache below only sees probed-and-confirmed-None dirs.
         let mut found_closer: Option<(PathBuf, Arc<ConfigResolver>)> = None;
-        for dir in &visited {
+        let mut probed_none_count = visited.len();
+        for (i, dir) in visited.iter().enumerate() {
             if let Some(loaded) = self.config_state.nested_config_ctx.probe_dir(dir)? {
                 found_closer = Some((dir.clone(), loaded));
+                probed_none_count = i;
                 break;
             }
         }
+        visited.truncate(probed_none_count);
 
         let (resolved_scope_dir, resolver) = match (found_closer, hit_via_lookup) {
             (Some((dir, loaded)), _) => (Some(dir), loaded),
@@ -567,8 +575,9 @@ impl WalkVisitor {
         };
 
         // Cache every dir that now has a confirmed scope:
-        // (1) the dir that owns the resolved scope, (2) probed dirs (acting as
-        // negative cache when probe returned None), (3) `parent` itself.
+        // (1) the dir that owns the resolved scope, (2) probed-and-None dirs
+        // (legitimate negative cache for dirs strictly below the resolved
+        // scope), (3) `parent` itself.
         // `or_insert_with_key` makes inserts idempotent — earlier writes win.
         let dirs_to_cache = resolved_scope_dir
             .into_iter()
@@ -772,5 +781,279 @@ impl FatalError {
     /// Take the recorded error out, leaving the slot empty.
     fn take(&self) -> Option<String> {
         self.0.lock().expect("fatal_error mutex poisoned").take()
+    }
+}
+
+// ---
+
+#[cfg(test)]
+mod tests_scope_resolution {
+    #[cfg(feature = "napi")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{fs, sync::mpsc};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn write_config(dir: &Path, contents: &str) {
+        fs::write(dir.join(".oxfmtrc.json"), contents).expect("write config");
+    }
+
+    fn make_ctx() -> NestedConfigCtx {
+        NestedConfigCtx::new(
+            None,
+            #[cfg(feature = "napi")]
+            None,
+        )
+    }
+
+    /// Minimal `WalkVisitor` for exercising `ensure_scope_cached`.
+    /// Channels / filters are dummies — the test never sends or applies them.
+    fn make_visitor(walk_root: &Path, ctx: NestedConfigCtx) -> WalkVisitor {
+        let mut root_resolver =
+            ConfigResolver::from_json_config(None, None).expect("default resolver");
+        root_resolver.build_and_validate().expect("validate default");
+
+        let (tx_entry, _rx_entry) = mpsc::channel();
+        let (tx_error, _rx_error) = mpsc::channel();
+
+        WalkVisitor {
+            cwd: Arc::from(walk_root),
+            filters: WalkFilters {
+                ignore_file_matchers: Arc::from(Vec::<Gitignore>::new()),
+                glob_matcher: None,
+                directly_processed: Arc::new(FxHashSet::default()),
+            },
+            config_state: WalkConfigState {
+                root_config_resolver: Arc::new(root_resolver),
+                nested_config_ctx: ctx,
+                detect_nested: true,
+                walk_target_roots: Arc::from(vec![walk_root.to_path_buf()]),
+            },
+            sinks: WalkSinks { sender: tx_entry, tx_error, fatal_error: FatalError::default() },
+            scope_cache: FxHashMap::default(),
+        }
+    }
+
+    /// Race simulation: another visitor already registered an outer ancestor
+    /// in `scope_by_dir`, but a closer dir has a config file on disk that
+    /// has NOT yet been registered. The Phase 2 race-rescue probe must pick
+    /// the closer config — this is the entire reason the probe exists even
+    /// when Phase 1 already had a lookup hit.
+    #[test]
+    fn race_rescue_picks_closer_config_when_outer_already_registered() {
+        let tmp = TempDir::new().expect("tempdir");
+        let outer = tmp.path().join("repo");
+        let closer = outer.join("src");
+        let leaf_parent = closer.join("sub");
+        fs::create_dir_all(&leaf_parent).expect("create dirs");
+
+        write_config(&outer, r#"{ "printWidth": 100 }"#);
+        write_config(&closer, r#"{ "printWidth": 60 }"#);
+
+        let ctx = make_ctx();
+        // Pre-register outer as if another visitor got there first.
+        ctx.probe_dir(&outer).expect("probe outer").expect("outer config");
+
+        let mut visitor = make_visitor(tmp.path(), ctx);
+        visitor.ensure_scope_cached(&leaf_parent).expect("resolve");
+
+        let (resolver, _) = &visitor.scope_cache[&leaf_parent];
+        assert_eq!(
+            resolver.config_dir(),
+            Some(closer.as_path()),
+            "race-rescue must pick the closer config even when an outer ancestor \
+             was already registered in scope_by_dir before this visitor ran"
+        );
+    }
+
+    /// When no closer config exists, the rescue probe returns `None` for
+    /// every visited dir and the outer lookup hit is retained. Guards
+    /// against an off-by-one rescue that drops the legitimate outer hit.
+    #[test]
+    fn race_rescue_falls_back_to_outer_hit_when_no_closer_config_exists() {
+        let tmp = TempDir::new().expect("tempdir");
+        let outer = tmp.path().join("repo");
+        let middle = outer.join("src");
+        let leaf_parent = middle.join("sub");
+        fs::create_dir_all(&leaf_parent).expect("create dirs");
+
+        write_config(&outer, r#"{ "printWidth": 100 }"#);
+
+        let ctx = make_ctx();
+        ctx.probe_dir(&outer).expect("probe outer").expect("outer config");
+
+        let mut visitor = make_visitor(tmp.path(), ctx);
+        visitor.ensure_scope_cached(&leaf_parent).expect("resolve");
+
+        let (resolver, _) = &visitor.scope_cache[&leaf_parent];
+        assert_eq!(
+            resolver.config_dir(),
+            Some(outer.as_path()),
+            "with no closer config on disk, the outer lookup hit must be retained"
+        );
+    }
+
+    /// When Phase 2 finds a closer config at `visited[i]` and breaks,
+    /// entries `visited[i+1..]` were never probed. They must NOT be cached
+    /// with the closer's resolver — they sit ABOVE the closer dir in the
+    /// ancestor chain and do not share its scope.
+    ///
+    /// Example: parent = /repo/src has a direct config. Phase 1 collects
+    /// `visited = [/repo/src, /repo, walk_root]`. Phase 2 breaks at
+    /// /repo/src. /repo and walk_root were not probed — caching them with
+    /// /repo/src's resolver would later misroute a file at /repo/other.ts
+    /// (whose parent /repo would hit the early-return in
+    /// `ensure_scope_cached`) through /repo/src's config.
+    #[test]
+    fn ancestors_above_closer_must_not_inherit_its_scope() {
+        let tmp = TempDir::new().expect("tempdir");
+        let outer = tmp.path().join("repo");
+        let closer = outer.join("src");
+        fs::create_dir_all(&closer).expect("create dirs");
+
+        write_config(&closer, r#"{ "printWidth": 60 }"#);
+
+        let ctx = make_ctx();
+        let mut visitor = make_visitor(tmp.path(), ctx);
+        visitor.ensure_scope_cached(&closer).expect("resolve");
+
+        if let Some((resolver, _)) = visitor.scope_cache.get(outer.as_path()) {
+            assert_ne!(
+                resolver.config_dir(),
+                Some(closer.as_path()),
+                "ancestor /repo (above closer /repo/src) must not be cached with \
+                 /repo/src's resolver — files at /repo/other.ts would otherwise be \
+                 formatted with the wrong config"
+            );
+        }
+    }
+
+    /// Fast path: `parent` itself has a direct config — Phase 2's first
+    /// probe hits and breaks. No outer-ancestor state is involved.
+    #[test]
+    fn parent_with_direct_config_resolves_to_itself() {
+        let tmp = TempDir::new().expect("tempdir");
+        let parent_dir = tmp.path().join("repo").join("src");
+        fs::create_dir_all(&parent_dir).expect("create dirs");
+
+        write_config(&parent_dir, r#"{ "printWidth": 60 }"#);
+
+        let ctx = make_ctx();
+        let mut visitor = make_visitor(tmp.path(), ctx);
+        visitor.ensure_scope_cached(&parent_dir).expect("resolve");
+
+        let (resolver, _) = &visitor.scope_cache[&parent_dir];
+        assert_eq!(resolver.config_dir(), Some(parent_dir.as_path()));
+    }
+
+    /// Phase 2 (direct file targets) must return the pre-built root resolver
+    /// by `Arc::ptr_eq` when ancestor walk reaches `root_config_dir` — i.e.,
+    /// it must NOT re-load the root config through `config_load_cache`.
+    /// For JS root configs that path would otherwise invoke the NAPI loader
+    /// a second time on every Phase 2 file.
+    #[test]
+    fn phase2_at_root_config_dir_returns_same_arc_without_reloading() {
+        let tmp = TempDir::new().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let src = repo.join("src");
+        fs::create_dir_all(&src).expect("create dirs");
+        write_config(&repo, r#"{ "printWidth": 80 }"#);
+
+        let target_file = src.join("file.ts");
+        fs::write(&target_file, "").expect("write target");
+
+        let mut root_resolver =
+            ConfigResolver::from_json_config(Some(&repo.join(".oxfmtrc.json")), None)
+                .expect("load root config");
+        root_resolver.build_and_validate().expect("validate root config");
+        let root_resolver = Arc::new(root_resolver);
+
+        let ctx = make_ctx();
+        let resolved = resolve_file_scope_config(&target_file, &root_resolver, &ctx)
+            .expect("resolve file scope");
+
+        assert!(
+            Arc::ptr_eq(&resolved, &root_resolver),
+            "Phase 2 must return the pre-built root Arc directly (no config_load_cache round-trip)"
+        );
+    }
+
+    /// `config_load_cache` + `OnceLock` must dedupe NAPI loader invocations
+    /// across concurrent `probe_dir` callers on the same dir.
+    ///
+    /// This is the single most important guarantee for large repos with JS
+    /// configs: an N-thread walk that all reach the same nested
+    /// `oxfmt.config.ts` must trigger the JS loader exactly once, not N
+    /// times. E2E tests cannot observe NAPI call counts.
+    #[cfg(feature = "napi")]
+    #[test]
+    fn napi_loader_called_once_per_dir_across_concurrent_probes() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("repo");
+        fs::create_dir_all(&dir).expect("create dir");
+        fs::write(dir.join("oxfmt.config.ts"), "export default {};").expect("write config");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_in_cb = Arc::clone(&counter);
+        let cb: JsConfigLoaderCb = Arc::new(move |_path: String| {
+            counter_in_cb.fetch_add(1, Ordering::Relaxed);
+            Ok(serde_json::json!({}))
+        });
+
+        let ctx = NestedConfigCtx::new(None, Some(cb));
+
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let ctx_local = ctx.clone();
+                let dir_local = dir.clone();
+                s.spawn(move || {
+                    ctx_local.probe_dir(&dir_local).expect("probe").expect("loaded");
+                });
+            }
+        });
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "NAPI loader must be invoked exactly once even with 8 concurrent probes"
+        );
+    }
+
+    /// A broken JS config's `Err` must be cached so concurrent / repeated
+    /// `probe_dir` calls don't retry the failing load. Without `Err`
+    /// caching, every visitor that walked through a broken-config dir would
+    /// re-invoke the NAPI loader.
+    #[cfg(feature = "napi")]
+    #[test]
+    fn napi_loader_err_is_cached_and_not_retried() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("repo");
+        fs::create_dir_all(&dir).expect("create dir");
+        fs::write(dir.join("oxfmt.config.ts"), "broken").expect("write config");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_in_cb = Arc::clone(&counter);
+        let cb: JsConfigLoaderCb = Arc::new(move |_path: String| {
+            counter_in_cb.fetch_add(1, Ordering::Relaxed);
+            Err("simulated load failure".to_string())
+        });
+
+        let ctx = NestedConfigCtx::new(None, Some(cb));
+
+        let err1 = ctx.probe_dir(&dir).expect_err("first probe should error");
+        let err2 = ctx.probe_dir(&dir).expect_err("second probe should hit cached Err");
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "loader must not be re-invoked after an Err is cached"
+        );
+        assert_eq!(err1, err2, "both errors must come from the same cached load");
+        assert!(
+            err1.contains("simulated load failure"),
+            "cached Err must surface the underlying loader message, got: {err1}"
+        );
     }
 }

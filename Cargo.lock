@@ -2642,6 +2642,7 @@ dependencies = [
  "serde_json",
  "simdutf8",
  "sort-package-json",
+ "tempfile",
  "tokio",
  "tower-lsp-server",
  "tracing",
