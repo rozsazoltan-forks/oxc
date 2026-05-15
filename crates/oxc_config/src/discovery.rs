@@ -77,69 +77,15 @@ impl ConfigDiscovery {
         vec![self.config_file_names.json, self.config_file_names.jsonc, self.config_file_names.js]
     }
 
-    /// Find the only supported config file directly inside `dir`.
-    ///
-    /// Returns `Ok(None)` when no config file exists, and returns
-    /// [`ConfigConflict`] when multiple configs are found.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigConflict`] when more than one supported config file is
-    /// found directly inside `dir`.
-    pub fn find_unique_config_in_directory(
-        &self,
-        dir: &Path,
-    ) -> Result<Option<DiscoveredConfigFile>, ConfigConflict> {
-        let configs = self.find_configs_in_directory(dir);
-
-        match configs.len() {
-            0 => Ok(None),
-            1 => Ok(configs.into_iter().next()),
-            _ => Err(ConfigConflict::new(dir.to_path_buf(), configs)),
-        }
-    }
-
-    /// Find all supported config files directly inside `dir`.
-    ///
-    /// In Vite+ mode, only the configured Vite file name is recognized. In
-    /// regular mode, JSON, JSONC, and JavaScript/TypeScript config names are
-    /// returned in that order when they exist.
-    pub fn find_configs_in_directory(&self, dir: &Path) -> Vec<DiscoveredConfigFile> {
-        if self.vite_plus_mode {
-            let vite_path = dir.join(self.config_file_names.vite);
-            if vite_path.is_file() {
-                return self.discover_config_file(&vite_path).into_iter().collect();
-            }
-            return Vec::new();
-        }
-
-        let mut configs = Vec::new();
-        for path in [
-            dir.join(self.config_file_names.json),
-            dir.join(self.config_file_names.jsonc),
-            dir.join(self.config_file_names.js),
-        ] {
-            if path.is_file()
-                && let Some(config) = self.discover_config_file(&path)
-            {
-                configs.push(config);
-            }
-        }
-
-        configs
-    }
-
     /// Find the unique config file directly inside `dir` using a single `read_dir`.
     ///
-    /// Unlike [`Self::find_unique_config_in_directory`] which calls `is_file()`
-    /// per candidate name (one `stat` syscall per supported name),
-    /// this issues a single `read_dir()` and matches entry names in memory.
+    /// Issues one `read_dir()` and matches entry names in memory,
+    /// avoiding the per-candidate `stat` syscalls that a name-by-name probe would incur.
     ///
-    /// When `follow_symlinks` is `true`, symlink entries fall back to
-    /// `Path::is_file()` so a symlinked config is still recognized,
-    /// matching the historical [`Self::find_unique_config_in_directory`] behavior.
-    /// When `false`, only regular files are considered; symlinks, directories,
-    /// and other entry types are skipped, matching walkers configured with `follow_links(false)`.
+    /// When `follow_symlinks` is `true`,
+    /// symlink entries fall back to `Path::is_file()` so a symlinked config is still recognized.
+    /// When `false`, only regular files are considered;
+    /// symlinks, directories, and other entry types are skipped, matching walkers configured with `follow_links(false)`.
     ///
     /// Returns `Ok(None)` when `dir` is unreadable;
     /// the caller can decide whether that warrants a diagnostic.
