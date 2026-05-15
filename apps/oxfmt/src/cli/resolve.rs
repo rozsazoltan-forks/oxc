@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-#[cfg(feature = "napi")]
-use crate::core::JsConfigLoaderCb;
-use crate::core::{ConfigResolver, utils::normalize_relative_path};
+use crate::core::{ConfigResolver, DiscoveryCtx, utils::normalize_relative_path};
 
 /// Resolve ignore file paths from CLI args or defaults.
 ///
@@ -107,34 +108,29 @@ pub(super) fn is_ignored(
     false
 }
 
-/// Resolve the nearest config scope for a file target.
-/// Returns `None` if the file belongs to the root scope.
+/// Resolve the nearest config scope for an explicit file target. Falls back to root.
+///
+/// Reaching `root_config_resolver.config_dir()` returns the pre-built root
+/// resolver directly — re-loading via the shared cache would create a
+/// duplicate `Arc` and (for JS root configs) re-invoke the NAPI loader.
 pub(super) fn resolve_file_scope_config(
     file: &Path,
-    root_config_dir: Option<&Path>,
-    editorconfig_path: Option<&Path>,
-    #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
-) -> Result<Option<ConfigResolver>, String> {
+    root_config_resolver: &Arc<ConfigResolver>,
+    ctx: &DiscoveryCtx,
+) -> Result<Arc<ConfigResolver>, String> {
     let Some(parent) = file.parent() else {
-        return Ok(None);
+        return Ok(Arc::clone(root_config_resolver));
     };
+    let root_config_dir = root_config_resolver.config_dir();
 
-    let mut resolver = ConfigResolver::from_config(
-        parent,
-        None,
-        editorconfig_path,
-        #[cfg(feature = "napi")]
-        js_config_loader,
-    )
-    .map_err(|err| format!("Failed to load config for {}: {err}", file.display()))?;
-
-    // No config found, or same as root → belongs to root scope
-    if resolver.config_dir().is_none() || resolver.config_dir() == root_config_dir {
-        return Ok(None);
+    for dir in parent.ancestors() {
+        if Some(dir) == root_config_dir {
+            return Ok(Arc::clone(root_config_resolver));
+        }
+        if let Some(r) = ctx.probe_dir(dir)? {
+            return Ok(r);
+        }
     }
 
-    resolver
-        .build_and_validate()
-        .map_err(|err| format!("Failed to parse config for {}: {err}", file.display()))?;
-    Ok(Some(resolver))
+    Ok(Arc::clone(root_config_resolver))
 }

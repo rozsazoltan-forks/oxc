@@ -1,15 +1,23 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use editorconfig_parser::{
     EditorConfig, EditorConfigProperties, EditorConfigProperty, EndOfLine, IndentStyle,
     MaxLineLength, QuoteType,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use rustc_hash::FxHashMap;
 use serde_json::Value;
 use tracing::instrument;
 
 use oxc_config::{
-    ConfigDiscovery, ConfigFileNames, DiscoveredConfigFile, GlobSet, is_js_config_path,
+    ConfigConflict, ConfigDiscovery, ConfigFileNames, DiscoveredConfigFile, GlobSet,
+    is_js_config_path,
 };
 #[cfg(feature = "napi")]
 use oxc_formatter::FormatOptions;
@@ -36,6 +44,265 @@ pub fn config_discovery() -> ConfigDiscovery {
         OXFMT_CONFIG_FILE_NAMES,
         cfg!(feature = "napi") && utils::vp_version().is_some(),
     )
+}
+
+/// Find the unique config file directly inside `dir` using a single `read_dir`.
+///
+/// Unlike `ConfigDiscovery::find_unique_config_in_directory` which calls
+/// `is_file()` per candidate name, this issues one `read_dir` and matches
+/// entry names — no extra `stat` syscalls.
+///
+/// Only regular files are considered: directories and symlinks (regardless of
+/// target) are skipped. This matches the walker's `follow_links(false)`
+/// behavior so config discovery and file traversal stay consistent.
+///
+/// Returns `Ok(None)` when `dir` is unreadable; the caller can decide whether
+/// that warrants a diagnostic.
+pub fn find_unique_config_by_readdir(
+    dir: &Path,
+) -> Result<Option<DiscoveredConfigFile>, ConfigConflict> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(None);
+    };
+
+    let discovery = config_discovery();
+    // Cache the supported names once; the iteration body needs only name comparison.
+    let config_names = discovery.config_file_names();
+    let mut matches = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !config_names.iter().any(|n| name == *n) {
+            continue;
+        }
+
+        let Ok(file_type) = entry.file_type() else { continue };
+        // Intentional: skip directories, symlinks, sockets, ... — only
+        // regular files are considered configs (matches walker's
+        // `follow_links(false)`).
+        #[expect(clippy::filetype_is_file)]
+        if !file_type.is_file() {
+            continue;
+        }
+
+        if let Some(config) = discovery.discover_config_file(&entry.path()) {
+            matches.push(config);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(ConfigConflict::new(dir.to_path_buf(), matches)),
+    }
+}
+
+// ---
+// Shared on-demand config discovery infrastructure.
+//
+// Discovery state is centralized in `DiscoveryCtx` so Phase 2 (direct file
+// targets), Phase 3 (parallel walk), and the stdin path all share one cache
+// (each load runs at most once walk-wide) and one signal (`any_config_found`).
+
+/// Result of loading a direct config in a single directory.
+pub type ConfigLoadResult = Result<Option<Arc<ConfigResolver>>, String>;
+
+/// Walk-wide shared cache for direct-config loads.
+///
+/// Each entry's `OnceLock` ensures the underlying load runs at most once per
+/// directory across all visitors and across phases.
+pub type ConfigLoadCache = Arc<Mutex<FxHashMap<PathBuf, Arc<OnceLock<ConfigLoadResult>>>>>;
+
+/// Walk-wide shared map of "directory has a direct config" entries.
+///
+/// **Lock discipline**: never hold this lock across a `ConfigLoadCache` load.
+/// Acquire the read/write lock, do the lookup or insert, release immediately.
+pub type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
+
+/// Shared discovery context: cached `ConfigDiscovery` + load cache + scope map +
+/// loader inputs (`editorconfig_path`, `js_config_loader`) + the
+/// `any_config_found` signal.
+///
+/// Cloning is shallow (each field is already `Arc` / `Copy`).
+#[derive(Clone)]
+pub struct DiscoveryCtx {
+    pub discovery: ConfigDiscovery,
+    pub editorconfig_path: Option<Arc<Path>>,
+    #[cfg(feature = "napi")]
+    pub js_config_loader: Option<JsConfigLoaderCb>,
+    pub any_config_found: Arc<AtomicBool>,
+    pub scope_by_dir: ScopeByDir,
+    pub config_load_cache: ConfigLoadCache,
+}
+
+impl DiscoveryCtx {
+    pub fn new(
+        editorconfig_path: Option<Arc<Path>>,
+        #[cfg(feature = "napi")] js_config_loader: Option<JsConfigLoaderCb>,
+    ) -> Self {
+        Self {
+            discovery: config_discovery(),
+            editorconfig_path,
+            #[cfg(feature = "napi")]
+            js_config_loader,
+            any_config_found: Arc::new(AtomicBool::new(false)),
+            scope_by_dir: Arc::new(RwLock::new(FxHashMap::default())),
+            config_load_cache: Arc::new(Mutex::new(FxHashMap::default())),
+        }
+    }
+
+    /// Get-or-compute the direct-config load result for `dir`, dedupe walk-wide.
+    ///
+    /// `OnceLock::get_or_init` blocks concurrent callers for the same `dir`
+    /// until the first init completes. `Ok(Some(_))` / `Ok(None)` / `Err(_)`
+    /// are all cached, so broken configs are not retried and "no config in
+    /// this dir" lookups stay O(1).
+    pub fn get_or_load_direct_config(&self, dir: &Path) -> ConfigLoadResult {
+        // Acquire (or insert) the cell, then drop the outer mutex immediately.
+        let cell = {
+            let mut guard =
+                self.config_load_cache.lock().expect("config_load_cache mutex poisoned");
+            let entry = guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::new(OnceLock::new()));
+            Arc::clone(entry)
+        };
+
+        cell.get_or_init(|| {
+            load_direct_config_in_dir(
+                dir,
+                self.editorconfig_path.as_deref(),
+                #[cfg(feature = "napi")]
+                self.js_config_loader.as_ref(),
+            )
+        })
+        .clone()
+    }
+
+    /// Mark that a nested config was discovered. Idempotent.
+    pub fn mark_config_found(&self) {
+        self.any_config_found.store(true, Ordering::Relaxed);
+    }
+
+    pub fn config_found(&self) -> bool {
+        self.any_config_found.load(Ordering::Relaxed)
+    }
+
+    /// Read `scope_by_dir` for `dir`; on miss, probe via the load cache and
+    /// register the result.
+    ///
+    /// Returns:
+    /// - `Ok(Some(_))` — `dir` has a direct config (registered).
+    /// - `Ok(None)` — `dir` has no direct config, or Vite+ `.fmt` missing.
+    /// - `Err(_)` — load / parse / validate failure.
+    ///
+    /// On a successful load, `mark_config_found()` is called and the resolver
+    /// is inserted into `scope_by_dir` (only the first writer wins per dir).
+    pub fn probe_dir(&self, dir: &Path) -> Result<Option<Arc<ConfigResolver>>, String> {
+        let hit = {
+            let guard = self.scope_by_dir.read().expect("scope_by_dir rwlock poisoned");
+            guard.get(dir).cloned()
+        };
+        if hit.is_some() {
+            return Ok(hit);
+        }
+
+        match self.get_or_load_direct_config(dir)? {
+            Some(loaded) => {
+                self.mark_config_found();
+                let mut guard = self.scope_by_dir.write().expect("scope_by_dir rwlock poisoned");
+                guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::clone(&loaded));
+                Ok(Some(loaded))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Load and validate a config file located **directly** inside `dir`.
+///
+/// Returns `Ok(None)` when `dir` has no supported config file, or when a
+/// `vite.config.ts` is present but lacks a `.fmt` field (Vite+ mode). This
+/// matches `discover_config`'s "skip and continue" semantics applied at a
+/// single-dir scope.
+fn load_direct_config_in_dir(
+    dir: &Path,
+    editorconfig_path: Option<&Path>,
+    #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
+) -> Result<Option<Arc<ConfigResolver>>, String> {
+    let Some(config_file) = find_unique_config_by_readdir(dir)
+        .map_err(|e| Into::<oxc_diagnostics::OxcDiagnostic>::into(e).to_string())?
+    else {
+        return Ok(None);
+    };
+
+    let editorconfig = load_editorconfig(dir, editorconfig_path)?;
+    let load_err = |err: String| format!("Failed to load config in {}: {err}", dir.display());
+
+    let Some(mut resolver) = build_resolver_from_discovered(
+        config_file,
+        editorconfig,
+        #[cfg(feature = "napi")]
+        js_config_loader,
+    )
+    .map_err(load_err)?
+    else {
+        return Ok(None);
+    };
+
+    resolver.build_and_validate().map_err(load_err)?;
+    Ok(Some(Arc::new(resolver)))
+}
+
+/// Build a `ConfigResolver` from a single discovered config file (no ancestor walk,
+/// no `build_and_validate`).
+///
+/// Returns `Ok(None)` for the Vite+ "missing `.fmt`" case so callers can decide
+/// whether to skip-and-continue (ancestor walk) or treat it as "no config in this dir".
+fn build_resolver_from_discovered(
+    config_file: DiscoveredConfigFile,
+    editorconfig: Option<EditorConfig>,
+    #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
+) -> Result<Option<ConfigResolver>, String> {
+    match config_file {
+        DiscoveredConfigFile::Json(path) | DiscoveredConfigFile::Jsonc(path) => {
+            ConfigResolver::from_json_config(Some(&path), editorconfig).map(Some)
+        }
+        #[cfg(not(feature = "napi"))]
+        DiscoveredConfigFile::Js(path) | DiscoveredConfigFile::Vite(path) => Err(format!(
+            "JS/TS config file ({}) is not supported in pure Rust CLI.\nUse JSON/JSONC instead.",
+            path.display()
+        )),
+        #[cfg(feature = "napi")]
+        DiscoveredConfigFile::Js(path) => {
+            // Non-Vite JS config: `loadJsConfig` never returns `null`; failures bubble up as `Err`.
+            let raw_config = load_js_config(
+                js_config_loader
+                    .expect("JS config loader must be set when `napi` feature is enabled"),
+                &path,
+            )?
+            .expect("loadJsConfig never returns null for non-Vite JS config");
+            Ok(Some(ConfigResolver::new(
+                raw_config,
+                path.parent().map(Path::to_path_buf),
+                editorconfig,
+            )))
+        }
+        #[cfg(feature = "napi")]
+        DiscoveredConfigFile::Vite(path) => {
+            let Some(raw_config) = load_js_config(
+                js_config_loader
+                    .expect("JS config loader must be set when `napi` feature is enabled"),
+                &path,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(ConfigResolver::new(
+                raw_config,
+                path.parent().map(Path::to_path_buf),
+                editorconfig,
+            )))
+        }
+    }
 }
 
 pub fn resolve_editorconfig_path(cwd: &Path) -> Option<PathBuf> {
@@ -169,11 +436,6 @@ impl ConfigResolver {
         self.config_dir.as_deref()
     }
 
-    /// Returns `true` if this config has any `ignorePatterns`.
-    pub fn has_ignore_patterns(&self) -> bool {
-        self.ignore_glob.is_some()
-    }
-
     /// Returns `true` if the given path should be ignored by this config's `ignorePatterns`.
     pub fn is_path_ignored(&self, path: &Path, is_dir: bool) -> bool {
         self.ignore_glob.as_ref().is_some_and(|glob| {
@@ -269,53 +531,14 @@ impl ConfigResolver {
                 continue;
             };
 
-            match config_file {
-                DiscoveredConfigFile::Json(path) | DiscoveredConfigFile::Jsonc(path) => {
-                    return Self::from_json_config(Some(&path), editorconfig);
-                }
-                #[cfg(not(feature = "napi"))]
-                DiscoveredConfigFile::Js(path) | DiscoveredConfigFile::Vite(path) => {
-                    return Err(format!(
-                        "JS/TS config file ({}) is not supported in pure Rust CLI.\nUse JSON/JSONC instead.",
-                        path.display()
-                    ));
-                }
+            // Vite+ with `.fmt` missing returns `None` → keep searching upwards.
+            if let Some(resolver) = build_resolver_from_discovered(
+                config_file,
+                editorconfig.clone(),
                 #[cfg(feature = "napi")]
-                DiscoveredConfigFile::Js(path) => {
-                    // JS `loadJsConfig()` (non-Vite+ mode) never returns `null`,
-                    // failures are raised as errors by `load_js_config()`.
-                    let raw_config = load_js_config(
-                        js_config_loader
-                            .expect("JS config loader must be set when `napi` feature is enabled"),
-                        &path,
-                    )?
-                    .expect("loadJsConfig never returns null for non-Vite JS config");
-
-                    return Ok(Self::new(
-                        raw_config,
-                        path.parent().map(Path::to_path_buf),
-                        editorconfig,
-                    ));
-                }
-                #[cfg(feature = "napi")]
-                DiscoveredConfigFile::Vite(path) => {
-                    // JS `loadVitePlusConfig()` (Vite+ mode) returns `null`
-                    // when `.fmt` is missing, skip and continue searching upwards.
-                    let Some(raw_config) = load_js_config(
-                        js_config_loader
-                            .expect("JS config loader must be set when `napi` feature is enabled"),
-                        &path,
-                    )?
-                    else {
-                        continue;
-                    };
-
-                    return Ok(Self::new(
-                        raw_config,
-                        path.parent().map(Path::to_path_buf),
-                        editorconfig,
-                    ));
-                }
+                js_config_loader,
+            )? {
+                return Ok(resolver);
             }
         }
 

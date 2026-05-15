@@ -16,7 +16,7 @@ use super::resolve::{build_global_ignore_matchers, is_ignored, resolve_file_scop
 #[cfg(feature = "napi")]
 use crate::core::JsConfigLoaderCb;
 use crate::core::{
-    ConfigResolver, FormatStrategy, ResolveOutcome, classify_file_kind, config_discovery,
+    ConfigResolver, DiscoveryCtx, FormatStrategy, ResolveOutcome, classify_file_kind,
 };
 
 /// Orchestrates file discovery with nested config and ignore handling.
@@ -34,31 +34,50 @@ use crate::core::{
 /// # Walk phases
 /// - Phase 1: Classify CLI positional PATHs into directory targets, file targets, and globs
 /// - Phase 2: File targets are processed directly (no walk)
-///   - Scope is resolved upward from the file's parent, O(depth) per unique parent
+///   - Scope is resolved by walking `file.parent().ancestors()` and probing each
+///     dir via `get_or_load_direct_config` (shared cache). The first hit wins;
+///     reaching `root_config_dir` returns the pre-built root resolver without
+///     re-loading.
 ///   - This helps with performance when many file targets are specified like with `husky`
-///     - Processed even when nested detection is disabled (no pre-scan, no child scopes loaded)
-/// - Phase 3: Directory targets are walked via a flat single-walk architecture
-///   - 3-1. Pre-scan: walk entries to discover nested config file locations
-///     - Required to build the scope map before streaming walk begins (see `prescan_config_locations()`)
-///     - Cost: O(entries), but avoids per-directory config-file metadata probes; skipped when `--config` is given
-///   - 3-2. Load child scopes: load all discovered configs into a scope map
-///   - 3-3. Build ancestor set (only when any scope has `ignorePatterns`):
-///     - Records which directories have a config descendant,
-///       so `filter_entry()` can safely skip `ignorePatterns` matches without hiding nested configs
-///   - 3-4. Parallel walk: a single `WalkBuilder` walk processes all files
+///     (the shared cache deduplicates loads across siblings).
+/// - Phase 3: Directory targets are walked via a single parallel walk
+///   - Discovery is **entry-based**: `filter_entry` lets config-looking files
+///     pass file-level global ignore so `visit()` can register them in
+///     `scope_by_dir` (the walk-wide shared scope map).
+///   - Non-config file `visit()` resolves scope by ancestor lookup against
+///     `scope_by_dir` + the visitor-local `scope_cache`, with a race-rescue
+///     `get_or_load_direct_config` probe across `visited` (closer-first) so
+///     `nearest-config-wins` holds even when a closer config has not yet been
+///     registered by another visitor.
+///   - All loads (JSON / JSONC / JS / Vite) go through `config_load_cache`
+///     (`OnceLock` per dir) so each directory's config is loaded **at most
+///     once walk-wide**, including across Phase 2 / Phase 3.
 ///
 /// # Ignore model
-/// Three layers, checked in `filter_entry()` (directories) and `visit()` (files).
+/// Three layers, checked in `filter_entry()` and `visit()`.
 ///
 /// - (1) Hardcoded skips: `.git`, `.svn`, `node_modules`, etc
 ///   - Always skipped in `filter_entry()`, cannot be overridden by ignore files or patterns
 /// - (2) Global ignores: `.prettierignore`, `--ignore-path`, CLI `"!path"`
-///   - Block both directories and files across all scopes
+///   - Block both directories and files across all scopes.
+///   - **Exception**: `filter_entry` lets config-looking files (`.oxfmtrc.json`
+///     etc.) bypass file-level global ignore so discovery can register their
+///     scope. `visit()` re-applies global ignore to those entries before
+///     deciding format eligibility.
 /// - (3) Scope-local `ignorePatterns`: each scope's config can define patterns
-///   - Directories (`filter_entry`): scope is resolved per-directory, then that scope's `ignorePatterns` are checked
-///     - The directory is skipped only when the pre-scan ancestor set confirms no config descendant exists
-///   - Files (`visit`): scope is resolved per-parent-directory (cached), then that scope's `ignorePatterns` are checked
-///     - This handles file-specific patterns (e.g. `*.generated.js`) and files inside directories that couldn't be skipped (config descendants).
+///   - Applied per-file in `visit()` against the file's resolved scope. Inner
+///     scopes' `ignorePatterns` correctly override outer ones because each
+///     file resolves to its nearest config.
+///
+/// # Atomicity on broken nested config
+///
+/// Nested configs are loaded lazily during the walk. When one fails to parse,
+/// the walk reports the error via `fatal_error` and stops, but format workers
+/// run concurrently and may have already written files in unaffected scopes
+/// to disk. Format is idempotent — the recommended recovery is to fix the
+/// failing config and re-run. Buffering writes until walk completion would
+/// give all-or-nothing semantics but at the cost of holding all formatted
+/// outputs in memory, which doesn't scale to very large monorepos.
 pub struct ScopedWalker {
     cwd: PathBuf,
     paths: Vec<PathBuf>,
@@ -175,41 +194,34 @@ impl ScopedWalker {
             (dirs, files)
         };
 
-        // Phase 2: Process file targets directly (no walk needed)
+        // Walk-wide shared discovery state. Cloning `DiscoveryCtx` is cheap
+        // (each field is `Arc` / `Copy`); the underlying caches and signals
+        // are shared across Phase 2, Phase 3, and across all parallel visitors.
+        let discovery_ctx = DiscoveryCtx::new(
+            editorconfig_path.map(Arc::from),
+            #[cfg(feature = "napi")]
+            js_config_loader.cloned(),
+        );
+        let fatal_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        // Phase 2: Process file targets directly (no walk needed).
         let mut directly_processed: FxHashSet<PathBuf> = FxHashSet::default();
         if !file_targets.is_empty() {
-            // Cache scope resolution results by parent directory to avoid redundant lookups
-            type ScopeEntry = Option<Arc<ConfigResolver>>;
-
-            let mut scope_cache: FxHashMap<&Path, ScopeEntry> = FxHashMap::default();
+            let mut scope_cache: FxHashMap<&Path, Arc<ConfigResolver>> = FxHashMap::default();
             for file in &file_targets {
                 // Skip non-existent files (WalkBuilder naturally skips these via error entries)
                 if !file.is_file() {
                     continue;
                 }
 
-                // Resolve which scope (config) this file belongs to
                 let file_config = if detect_nested {
                     let parent = file.parent().unwrap();
                     if !scope_cache.contains_key(parent) {
-                        let cached = resolve_file_scope_config(
-                            file,
-                            root_config_resolver.config_dir(),
-                            editorconfig_path,
-                            #[cfg(feature = "napi")]
-                            js_config_loader,
-                        )?
-                        .map(Arc::from);
-                        scope_cache.insert(parent, cached);
+                        let resolved =
+                            resolve_file_scope_config(file, &root_config_resolver, &discovery_ctx)?;
+                        scope_cache.insert(parent, resolved);
                     }
-
-                    match &scope_cache[parent] {
-                        Some(resolver) => {
-                            any_config_used = true;
-                            Arc::clone(resolver)
-                        }
-                        None => Arc::clone(&root_config_resolver),
-                    }
+                    Arc::clone(&scope_cache[parent])
                 } else {
                     Arc::clone(&root_config_resolver)
                 };
@@ -218,7 +230,6 @@ impl ScopedWalker {
                     continue;
                 }
 
-                // Not a formatting target (e.g. unsupported extension) — skip silently
                 let Some(kind) = classify_file_kind(Arc::from(file.as_path())) else {
                     continue;
                 };
@@ -238,7 +249,7 @@ impl ScopedWalker {
             }
         }
 
-        // Phase 3: Walk directory targets
+        // Phase 3: Walk directory targets.
         let directly_processed: Arc<FxHashSet<PathBuf>> = Arc::new(directly_processed);
 
         // Build the glob matcher once for walk-time filtering.
@@ -248,49 +259,8 @@ impl ScopedWalker {
             Arc::new(GlobMatcher::new(self.cwd.clone(), self.glob_patterns.clone(), &walk_targets))
         });
 
-        // Compute once and share across both walks (pre-scan and main).
         let has_vcs_boundary = all_paths_have_vcs_boundary(&walk_targets, &self.cwd);
-
-        // Pre-scan: discover nested config file locations
-        let config_dirs = if detect_nested {
-            prescan_config_locations(
-                &walk_targets,
-                has_vcs_boundary,
-                &ignore_file_matchers,
-                with_node_modules,
-            )
-        } else {
-            vec![]
-        };
-
-        let (child_scope_map, config_ancestors) = if config_dirs.is_empty() {
-            // No nested configs, = only root scope
-            (Arc::new(FxHashMap::default()), None)
-        } else {
-            // Load all child configs upfront into a scope map
-            let (map, has_children) = resolve_child_scope_configs(
-                &config_dirs,
-                root_config_resolver.config_dir(),
-                editorconfig_path,
-                #[cfg(feature = "napi")]
-                js_config_loader,
-            )?;
-            if has_children {
-                any_config_used = true;
-            }
-
-            // Build ancestor set for directory-level `ignorePatterns` skipping,
-            // only when any scope (root or child) has `ignorePatterns`.
-            let ancestors = if root_config_resolver.has_ignore_patterns()
-                || map.values().any(|r| r.has_ignore_patterns())
-            {
-                Some(build_config_ancestors(&config_dirs))
-            } else {
-                None
-            };
-
-            (Arc::new(map), ancestors)
-        };
+        let walk_target_roots: Arc<[PathBuf]> = Arc::from(walk_targets.clone());
 
         walk_and_stream(
             &self.cwd,
@@ -301,11 +271,23 @@ impl ScopedWalker {
             glob_matcher.as_ref(),
             &root_config_resolver,
             &directly_processed,
-            config_ancestors.as_ref(),
-            &child_scope_map,
+            discovery_ctx.clone(),
+            detect_nested,
+            walk_target_roots,
+            Arc::clone(&fatal_error),
             sender,
             tx_error,
         );
+
+        // Surface any fatal error encountered inside the parallel walk.
+        let fatal = fatal_error.lock().expect("fatal_error mutex poisoned").take();
+        if let Some(err) = fatal {
+            return Err(err);
+        }
+
+        if discovery_ctx.config_found() {
+            any_config_used = true;
+        }
 
         Ok(any_config_used)
     }
@@ -376,181 +358,6 @@ impl GlobMatcher {
 
 // ---
 
-/// Pre-scan directories within walk targets to discover nested config file locations.
-///
-/// A separate pass is required because the flat single-walk needs all configs
-/// loaded into a scope map before `visit()` can resolve file scopes.
-///
-/// This also preserves the streaming architecture (walk → channel → format workers),
-/// which keeps format workers busy sooner.
-/// This is critical because current bottleneck is non-JS file formatting via external JS runtime.
-///
-/// The returned directories are used to:
-/// 1. Load child scope configs (`resolve_child_scope_configs()`)
-/// 2. Build an ancestor set for `filter_entry()` directory skipping
-///
-/// Uses a parallel walk and only performs metadata checks for entries
-/// whose file names match supported config files.
-/// This avoids probing every directory for every possible config filename.
-#[instrument(level = "debug", name = "oxfmt::walk::prescan_config_locations", skip_all)]
-fn prescan_config_locations(
-    target_paths: &[PathBuf],
-    has_vcs_boundary: bool,
-    ignore_file_matchers: &Arc<[Gitignore]>,
-    with_node_modules: bool,
-) -> Vec<PathBuf> {
-    let Some(first) = target_paths.first() else {
-        return vec![];
-    };
-
-    let mut builder = ignore::WalkBuilder::new(first);
-    for path in target_paths.iter().skip(1) {
-        builder.add(path);
-    }
-
-    let matchers = Arc::clone(ignore_file_matchers);
-    let discovery = config_discovery();
-    builder.filter_entry(move |entry| {
-        let Some(file_type) = entry.file_type() else {
-            return false;
-        };
-        if file_type.is_dir() {
-            return !is_walk_excluded_dir(entry, &matchers, with_node_modules);
-        }
-        // Do not apply file-level global ignores here.
-        // The previous directory probe checked config files by path,
-        // so file-level ignore patterns did not hide nested configs.
-        // Only keep config-looking file entries
-        // so the visitor can confirm they are files (including symlinks to files).
-        discovery.discover_config_file(entry.path()).is_some()
-    });
-
-    let (sender, receiver) = mpsc::channel::<Vec<PathBuf>>();
-    let mut visitor = ConfigPrescanVisitorBuilder { sender };
-    configure_oxfmt_walk_builder(&mut builder, has_vcs_boundary)
-        .build_parallel()
-        .visit(&mut visitor);
-    drop(visitor);
-
-    let mut seen = FxHashSet::default();
-    let mut config_dirs = vec![];
-    for dir in receiver.into_iter().flatten() {
-        if seen.insert(dir.clone()) {
-            config_dirs.push(dir);
-        }
-    }
-    config_dirs.sort_unstable();
-
-    config_dirs
-}
-
-struct ConfigPrescanVisitorBuilder {
-    sender: mpsc::Sender<Vec<PathBuf>>,
-}
-
-impl<'s> ignore::ParallelVisitorBuilder<'s> for ConfigPrescanVisitorBuilder {
-    fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
-        Box::new(ConfigPrescanVisitor { config_dirs: vec![], sender: self.sender.clone() })
-    }
-}
-
-struct ConfigPrescanVisitor {
-    config_dirs: Vec<PathBuf>,
-    sender: mpsc::Sender<Vec<PathBuf>>,
-}
-
-impl Drop for ConfigPrescanVisitor {
-    fn drop(&mut self) {
-        let config_dirs = std::mem::take(&mut self.config_dirs);
-        let _ = self.sender.send(config_dirs);
-    }
-}
-
-impl ignore::ParallelVisitor for ConfigPrescanVisitor {
-    fn visit(&mut self, entry: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                    return ignore::WalkState::Continue;
-                }
-
-                let path = entry.path();
-                if path.is_file()
-                    && let Some(parent) = path.parent()
-                {
-                    self.config_dirs.push(parent.to_path_buf());
-                }
-
-                ignore::WalkState::Continue
-            }
-            Err(_) => ignore::WalkState::Skip,
-        }
-    }
-}
-
-// ---
-
-/// Load all child scope configs discovered by pre-scan.
-///
-/// Returns the scope map and a flag indicating whether any child scope had a config.
-/// Skips directories whose resolved config matches the root config dir
-/// (they belong to the root scope, not a child scope).
-#[instrument(level = "debug", name = "oxfmt::walk::load_child_scopes", skip_all)]
-fn resolve_child_scope_configs(
-    config_dirs: &[PathBuf],
-    root_config_dir: Option<&Path>,
-    editorconfig_path: Option<&Path>,
-    #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
-) -> Result<(FxHashMap<PathBuf, Arc<ConfigResolver>>, bool), String> {
-    let mut map = FxHashMap::default();
-    let mut has_children = false;
-    for config_dir in config_dirs {
-        let mut resolver = ConfigResolver::from_config(
-            config_dir,
-            // NOTE: Let it auto-discover (not a direct path) config,
-            // so that `discover_config()` can skip invalid candidates
-            // (e.g. `vite.config.ts` without a `.fmt` field)
-            // and continue searching upward.
-            None,
-            editorconfig_path,
-            #[cfg(feature = "napi")]
-            js_config_loader,
-        )
-        .map_err(|err| format!("Failed to load config in {}: {err}", config_dir.display()))?;
-
-        // No config found, or same as root → belongs to root scope
-        if resolver.config_dir().is_none() || resolver.config_dir() == root_config_dir {
-            continue;
-        }
-
-        resolver
-            .build_and_validate()
-            .map_err(|err| format!("Failed to parse config in {}: {err}", config_dir.display()))?;
-
-        has_children = true;
-        map.insert(config_dir.clone(), Arc::from(resolver));
-    }
-
-    Ok((map, has_children))
-}
-
-/// Build the ancestor set from discovered config directories.
-/// Enables O(1) "has config descendant?" lookups in `filter_entry()`,
-/// allowing `ignorePatterns` directories to be skipped when no nested config exists beneath them.
-fn build_config_ancestors(config_dirs: &[PathBuf]) -> Arc<FxHashSet<PathBuf>> {
-    let mut ancestors = FxHashSet::default();
-    for config_dir in config_dirs {
-        for ancestor in config_dir.ancestors() {
-            if !ancestors.insert(ancestor.to_path_buf()) {
-                break;
-            }
-        }
-    }
-    Arc::new(ancestors)
-}
-
-// ---
-
 /// Build a Walk, stream entries to the shared channel.
 #[expect(clippy::needless_pass_by_value)] // Arcs are moved into closures/structs
 fn walk_and_stream(
@@ -562,8 +369,10 @@ fn walk_and_stream(
     glob_matcher: Option<&Arc<GlobMatcher>>,
     root_config_resolver: &Arc<ConfigResolver>,
     directly_processed: &Arc<FxHashSet<PathBuf>>,
-    config_ancestors: Option<&Arc<FxHashSet<PathBuf>>>,
-    child_scope_map: &Arc<FxHashMap<PathBuf, Arc<ConfigResolver>>>,
+    discovery_ctx: DiscoveryCtx,
+    detect_nested: bool,
+    walk_target_roots: Arc<[PathBuf]>,
+    fatal_error: Arc<Mutex<Option<String>>>,
     sender: &mpsc::Sender<FormatStrategy>,
     tx_error: &DiagnosticSender,
 ) {
@@ -577,10 +386,7 @@ fn walk_and_stream(
     }
 
     let filter_global = Arc::clone(&ignore_file_matchers);
-    let filter_root_resolver = Arc::clone(root_config_resolver);
-    let filter_ancestors = config_ancestors.cloned();
-    let filter_child_scopes = Arc::clone(child_scope_map);
-    // NOTE: If return `false` here, it will not be `visit()`ed at all
+    let filter_discovery = discovery_ctx.discovery;
     inner.filter_entry(move |entry| {
         let Some(file_type) = entry.file_type() else {
             return false;
@@ -590,29 +396,23 @@ fn walk_and_stream(
         if is_dir && is_walk_excluded_dir(entry, &filter_global, with_node_modules) {
             return false;
         }
-        // Global ignores also apply to files (e.g. `*.test.js` in .prettierignore)
-        if !is_dir && is_ignored(&filter_global, entry.path(), false, false) {
+        // File-level global ignores apply, EXCEPT for config-looking files —
+        // those must reach `visit()` so entry-based discovery can register
+        // them in `scope_by_dir`. Whether they get formatted is decided
+        // separately in `visit()` by re-checking global ignore.
+        if !is_dir
+            && filter_discovery.discover_config_file(entry.path()).is_none()
+            && is_ignored(&filter_global, entry.path(), false, false)
+        {
             return false;
         }
-        // Check scope-specific `ignorePatterns` for directories.
-        // Resolves which scope (root or child) this directory belongs to,
-        // then checks that scope's ignorePatterns.
-        // Safe to skip when pre-scan confirms no config descendant exists beneath.
-        if is_dir && filter_ancestors.as_ref().is_some_and(|a| !a.contains(entry.path())) {
-            let resolver: &ConfigResolver = entry
-                .path()
-                .ancestors()
-                .find_map(|a| filter_child_scopes.get(a).map(AsRef::as_ref))
-                .unwrap_or(&filter_root_resolver);
-            if resolver.is_path_ignored(entry.path(), true) {
-                return false;
-            }
-        }
 
-        // NOTE: Glob pattern matching is NOT done here in `filter_entry()`.
-        // Glob patterns like `**/*.js` cannot be used to skip directories,
-        // since any directory could contain matching files at any depth.
-        // Glob filtering is instead done per-file in the visitor `visit()` below.
+        // Scope-local `ignorePatterns` are checked per-file in `visit()`
+        // against the file's resolved scope, which correctly handles the
+        // "inner config wins over outer" rule.
+        //
+        // Glob pattern matching is also done per-file in `visit()` since
+        // patterns like `**/*.js` cannot reliably skip directories.
         true
     });
 
@@ -622,8 +422,12 @@ fn walk_and_stream(
         tx_error: tx_error.clone(),
         root_config_resolver: Arc::clone(root_config_resolver),
         glob_matcher: glob_matcher.cloned(),
-        child_scope_map: Arc::clone(child_scope_map),
         directly_processed: Arc::clone(directly_processed),
+        discovery_ctx,
+        detect_nested,
+        walk_target_roots,
+        fatal_error,
+        filter_global: Arc::clone(&ignore_file_matchers),
     };
 
     configure_oxfmt_walk_builder(&mut inner, has_vcs_boundary).build_parallel().visit(&mut builder);
@@ -651,9 +455,14 @@ struct WalkVisitorBuilder {
     tx_error: DiagnosticSender,
     root_config_resolver: Arc<ConfigResolver>,
     glob_matcher: Option<Arc<GlobMatcher>>,
-    child_scope_map: Arc<FxHashMap<PathBuf, Arc<ConfigResolver>>>,
-    /// Files already processed as direct file targets (for dedup with walk results).
     directly_processed: Arc<FxHashSet<PathBuf>>,
+    discovery_ctx: DiscoveryCtx,
+    detect_nested: bool,
+    walk_target_roots: Arc<[PathBuf]>,
+    fatal_error: Arc<Mutex<Option<String>>>,
+    /// Needed in `visit()` to gate format eligibility for config-looking files
+    /// that bypass `filter_entry`.
+    filter_global: Arc<[Gitignore]>,
 }
 
 impl<'s> ignore::ParallelVisitorBuilder<'s> for WalkVisitorBuilder {
@@ -664,8 +473,12 @@ impl<'s> ignore::ParallelVisitorBuilder<'s> for WalkVisitorBuilder {
             tx_error: self.tx_error.clone(),
             root_config_resolver: Arc::clone(&self.root_config_resolver),
             glob_matcher: self.glob_matcher.clone(),
-            child_scope_map: Arc::clone(&self.child_scope_map),
             directly_processed: Arc::clone(&self.directly_processed),
+            discovery_ctx: self.discovery_ctx.clone(),
+            detect_nested: self.detect_nested,
+            walk_target_roots: Arc::clone(&self.walk_target_roots),
+            fatal_error: Arc::clone(&self.fatal_error),
+            filter_global: Arc::clone(&self.filter_global),
             scope_cache: FxHashMap::default(),
         })
     }
@@ -677,113 +490,225 @@ struct WalkVisitor {
     tx_error: DiagnosticSender,
     root_config_resolver: Arc<ConfigResolver>,
     glob_matcher: Option<Arc<GlobMatcher>>,
-    child_scope_map: Arc<FxHashMap<PathBuf, Arc<ConfigResolver>>>,
     directly_processed: Arc<FxHashSet<PathBuf>>,
-    /// Cache: parent dir → (resolved config, parent_ignored flag).
+    discovery_ctx: DiscoveryCtx,
+    detect_nested: bool,
+    walk_target_roots: Arc<[PathBuf]>,
+    fatal_error: Arc<Mutex<Option<String>>>,
+    filter_global: Arc<[Gitignore]>,
+    /// Visitor-local cache: parent dir → (resolved scope, parent_ignored flag).
+    /// Entries are direct-probe-confirmed; under static-FS they stay valid
+    /// for this visitor's lifetime.
     scope_cache: FxHashMap<PathBuf, (Arc<ConfigResolver>, bool)>,
 }
 
 impl WalkVisitor {
-    /// Ensure the scope for `parent` is cached, resolving it if needed.
+    /// Record the first fatal error seen by any visitor.
+    fn record_fatal(&self, err: String) {
+        let mut guard = self.fatal_error.lock().expect("fatal_error mutex poisoned");
+        if guard.is_none() {
+            *guard = Some(err);
+        }
+    }
+
+    /// Resolve and cache `parent`'s scope.
     ///
-    /// Walks `parent.ancestors()` to find the nearest child scope in the pre-loaded map.
-    /// Falls back to root scope if no child scope is found.
-    /// Caches the resolved scope and pre-computed `parent_ignored` flag.
-    fn ensure_scope_cached(&mut self, parent: &Path) {
+    /// Phase 1 walks `parent.ancestors()`, accumulating dirs without cache hit
+    /// into `visited`. Phase 2 race-probes every dir in `visited` (closer-first)
+    /// — even when Phase 1 hit an outer ancestor, this protects `nearest-config-wins`
+    /// against parallel visitors that may register a closer config concurrently.
+    fn ensure_scope_cached(&mut self, parent: &Path) -> Result<(), String> {
         if self.scope_cache.contains_key(parent) {
-            return;
+            return Ok(());
         }
 
-        // PERF: Skip ancestors traversal when no child scopes exist (e.g. `--disable-nested-config`)
-        let resolver = if self.child_scope_map.is_empty() {
-            Arc::clone(&self.root_config_resolver)
-        } else {
-            parent
-                .ancestors()
-                .find_map(|a| self.child_scope_map.get(a))
-                .cloned()
-                .unwrap_or_else(|| Arc::clone(&self.root_config_resolver))
+        // detect_nested off → root scope only.
+        if !self.detect_nested {
+            let parent_ignored = self.root_config_resolver.is_path_ignored(parent, true);
+            self.scope_cache.insert(
+                parent.to_path_buf(),
+                (Arc::clone(&self.root_config_resolver), parent_ignored),
+            );
+            return Ok(());
+        }
+
+        let probe_root: Option<&Path> = self
+            .walk_target_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|t| parent.starts_with(t))
+            .max_by_key(|t| t.components().count());
+        let root_config_dir = self.root_config_resolver.config_dir();
+
+        // Phase 1: cheap ancestor lookup (no probe).
+        let mut visited: Vec<PathBuf> = vec![];
+        let mut hit_via_lookup: Option<Arc<ConfigResolver>> = None;
+
+        'lookup: for dir in parent.ancestors() {
+            if let Some((r, _)) = self.scope_cache.get(dir) {
+                hit_via_lookup = Some(Arc::clone(r));
+                break 'lookup;
+            }
+
+            if Some(dir) == root_config_dir {
+                hit_via_lookup = Some(Arc::clone(&self.root_config_resolver));
+                break 'lookup;
+            }
+
+            let hit = {
+                let guard =
+                    self.discovery_ctx.scope_by_dir.read().expect("scope_by_dir rwlock poisoned");
+                guard.get(dir).cloned()
+            };
+            if let Some(r) = hit {
+                hit_via_lookup = Some(r);
+                break 'lookup;
+            }
+
+            visited.push(dir.to_path_buf());
+            if Some(dir) == probe_root {
+                break;
+            }
+        }
+
+        // Phase 2: race-rescue probe across `visited`, closer-first.
+        let mut found_closer: Option<(PathBuf, Arc<ConfigResolver>)> = None;
+        for dir in &visited {
+            if let Some(loaded) = self.discovery_ctx.probe_dir(dir)? {
+                found_closer = Some((dir.clone(), loaded));
+                break;
+            }
+        }
+
+        let (resolved_scope_dir, resolver) = match (found_closer, hit_via_lookup) {
+            (Some((dir, loaded)), _) => (Some(dir), loaded),
+            (None, Some(r)) => (None, r),
+            (None, None) => (None, Arc::clone(&self.root_config_resolver)),
         };
 
-        let parent_ignored = resolver.is_path_ignored(parent, true);
-        self.scope_cache.insert(parent.to_path_buf(), (resolver, parent_ignored));
+        // Cache: (1) the dir that owns the resolved scope, (2) negative-cached
+        // probed dirs, (3) `parent` itself if not yet covered.
+        if let Some(scope_dir) = resolved_scope_dir
+            && !self.scope_cache.contains_key(&scope_dir)
+        {
+            let parent_ignored = resolver.is_path_ignored(&scope_dir, true);
+            self.scope_cache.insert(scope_dir, (Arc::clone(&resolver), parent_ignored));
+        }
+        for dir in visited {
+            if self.scope_cache.contains_key(&dir) {
+                continue;
+            }
+            let parent_ignored = resolver.is_path_ignored(&dir, true);
+            self.scope_cache.insert(dir, (Arc::clone(&resolver), parent_ignored));
+        }
+        if !self.scope_cache.contains_key(parent) {
+            let parent_ignored = resolver.is_path_ignored(parent, true);
+            self.scope_cache.insert(parent.to_path_buf(), (resolver, parent_ignored));
+        }
+
+        Ok(())
     }
 }
 
 impl ignore::ParallelVisitor for WalkVisitor {
     fn visit(&mut self, entry: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
-        match entry {
-            Ok(entry) => {
-                let Some(file_type) = entry.file_type() else {
-                    return ignore::WalkState::Continue;
-                };
-                if file_type.is_dir() {
-                    return ignore::WalkState::Continue;
-                }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_err) => return ignore::WalkState::Skip,
+        };
 
-                // Use `is_file()` to detect symlinks to the directory named `.js`
-                #[expect(clippy::filetype_is_file)]
-                if file_type.is_file() {
-                    let path = entry.into_path();
-
-                    // Skip files already processed as direct file targets
-                    if self.directly_processed.contains(&path) {
-                        return ignore::WalkState::Continue;
-                    }
-
-                    // Resolve this file's scope (cached per parent directory)
-                    let parent = path.parent().expect("walk yields absolute paths");
-                    self.ensure_scope_cached(parent);
-                    let (resolver, parent_ignored) = &self.scope_cache[parent];
-
-                    // Check scope's `ignorePatterns` per-file.
-                    //
-                    // Two-level check:
-                    // 1. Parent directory (cached): catches directory patterns like "lib" that match all files under lib/.
-                    //    Uses check_ancestors so "lib" also catches files under lib/packages/.
-                    // 2. File-level: catches file-specific patterns like "temp.js".
-                    if *parent_ignored || resolver.is_path_ignored(&path, false) {
-                        return ignore::WalkState::Continue;
-                    }
-
-                    // When glob matcher is active,
-                    // only accept files that match glob patterns or explicitly specified concrete paths.
-                    if let Some(glob_matcher) = &self.glob_matcher
-                        && !glob_matcher.matches(&path)
-                    {
-                        return ignore::WalkState::Continue;
-                    }
-
-                    // Tier 1 = `.js`, `.tsx`, etc: JS/TS files supported by `oxc_formatter`
-                    // Tier 2 = `.toml`, etc: Some files supported by `oxfmt` directly
-                    // Tier 3 = `.html`, `.json`, etc: Other files supported by Prettier
-                    // (Tier 4 = `.astro`, `.svelte`, etc: Other files supported by Prettier plugins)
-                    // Everything else: Ignored
-                    // Not a formatting target (e.g. unsupported extension) — skip silently
-                    let path: Arc<Path> = Arc::from(path);
-                    let Some(kind) = classify_file_kind(Arc::clone(&path)) else {
-                        return ignore::WalkState::Continue;
-                    };
-                    let strategy = match resolver.resolve(kind) {
-                        Ok(ResolveOutcome::Format(strategy)) => strategy,
-                        Ok(ResolveOutcome::MissingPlugin(_)) => {
-                            return ignore::WalkState::Continue;
-                        }
-                        Err(err) => {
-                            report_resolve_error(&self.tx_error, &self.cwd, &path, err);
-                            return ignore::WalkState::Continue;
-                        }
-                    };
-
-                    if self.sender.send(strategy).is_err() {
-                        return ignore::WalkState::Quit;
-                    }
-                }
-
-                ignore::WalkState::Continue
-            }
-            Err(_err) => ignore::WalkState::Skip,
+        let Some(file_type) = entry.file_type() else {
+            return ignore::WalkState::Continue;
+        };
+        if file_type.is_dir() {
+            // No per-dir probe in the discovery path — entry-based discovery
+            // happens via `visit(config-looking file)` below.
+            return ignore::WalkState::Continue;
         }
+
+        // Skip non-regular entries (symlinks of any kind, sockets, etc.) to
+        // match the walker's `follow_links(false)` behavior.
+        #[expect(clippy::filetype_is_file)]
+        if !file_type.is_file() {
+            return ignore::WalkState::Continue;
+        }
+
+        let path = entry.into_path();
+
+        // Skip files already processed as direct file targets.
+        if self.directly_processed.contains(&path) {
+            return ignore::WalkState::Continue;
+        }
+
+        let parent = path.parent().expect("walk yields absolute paths");
+
+        // Identify config-looking files. Needed regardless of `detect_nested`
+        // because (B) re-applies global ignore for them: `filter_entry`
+        // exempts config files from file-level global ignore so discovery
+        // can see them, and (B) restores that filter for format eligibility.
+        let is_config_file = self.discovery_ctx.discovery.discover_config_file(&path).is_some();
+
+        // (A) Discovery: register the parent dir's scope (nested-detection only).
+        if is_config_file
+            && self.detect_nested
+            && let Err(err) = self.discovery_ctx.probe_dir(parent)
+        {
+            self.record_fatal(err);
+            return ignore::WalkState::Quit;
+        }
+
+        // (B) Re-apply file-level global ignore for config-looking files.
+        if is_config_file && is_ignored(&self.filter_global, &path, false, false) {
+            return ignore::WalkState::Continue;
+        }
+
+        // (C) Resolve scope for this file (cached per parent directory).
+        if let Err(err) = self.ensure_scope_cached(parent) {
+            self.record_fatal(err);
+            return ignore::WalkState::Quit;
+        }
+        let (resolver, parent_ignored) = &self.scope_cache[parent];
+
+        // Scope-local `ignorePatterns` check.
+        //
+        // Two-level: parent dir (cached) catches directory patterns like
+        // `lib`; file-level catches patterns like `temp.js`.
+        if *parent_ignored || resolver.is_path_ignored(&path, false) {
+            return ignore::WalkState::Continue;
+        }
+
+        // Glob filter (when active).
+        if let Some(glob_matcher) = &self.glob_matcher
+            && !glob_matcher.matches(&path)
+        {
+            return ignore::WalkState::Continue;
+        }
+
+        // Tier 1 = `.js`, `.tsx`, etc: JS/TS files supported by `oxc_formatter`
+        // Tier 2 = `.toml`, etc: Some files supported by `oxfmt` directly
+        // Tier 3 = `.html`, `.json`, etc: Other files supported by Prettier
+        // (Tier 4 = `.astro`, `.svelte`, etc: Prettier plugins)
+        // Anything else is silently skipped.
+        let path: Arc<Path> = Arc::from(path);
+        let Some(kind) = classify_file_kind(Arc::clone(&path)) else {
+            return ignore::WalkState::Continue;
+        };
+        let strategy = match resolver.resolve(kind) {
+            Ok(ResolveOutcome::Format(strategy)) => strategy,
+            Ok(ResolveOutcome::MissingPlugin(_)) => {
+                return ignore::WalkState::Continue;
+            }
+            Err(err) => {
+                report_resolve_error(&self.tx_error, &self.cwd, &path, err);
+                return ignore::WalkState::Continue;
+            }
+        };
+
+        if self.sender.send(strategy).is_err() {
+            return ignore::WalkState::Quit;
+        }
+
+        ignore::WalkState::Continue
     }
 }
 

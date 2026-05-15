@@ -29,18 +29,28 @@ pub type JsConfigLoaderCb = Arc<dyn Fn(String) -> Result<Value, String> + Send +
 ///
 /// The returned function blocks the current thread until the JS callback resolves.
 ///
-/// NOTE: Unlike `ExternalFormatter` which uses `napi::bindgen_prelude::block_on`
-/// and relies on call sites to wrap with `block_in_place()`,
-/// this uses `block_in_place` + `Handle::block_on` internally because
-/// it is called from both rayon worker threads (CLI) and async contexts (stdin, LSP)
-/// via `ConfigResolver::from_config()`, where adding per-call-site wrapping is impractical.
+/// The loader can be invoked from any thread, including:
+/// - rayon worker threads (Phase 3 walk visitors during on-demand discovery)
+/// - Tokio worker threads (Phase 2 direct file resolution, stdin, LSP)
+/// - bare threads (any other context that obtained a `JsConfigLoaderCb`)
+///
+/// We capture a `tokio::runtime::Handle` at creation time so the awaiting
+/// machinery does not depend on `Handle::current()` at call time. We then
+/// branch on the calling context:
+/// - inside a Tokio runtime, wrap with `block_in_place` so the Tokio worker
+///   can be reused for other tasks while we block on the NAPI promise
+/// - outside a Tokio runtime, drive the future directly via the captured handle
 pub fn create_js_config_loader(cb: JsLoadJsConfigCb) -> JsConfigLoaderCb {
+    let handle = tokio::runtime::Handle::current();
     Arc::new(move |path: String| {
         let cb = &cb;
-        let res = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { cb.call_async(path).await?.into_future().await })
-        });
+        let handle = handle.clone();
+        let fut = async move { cb.call_async(path).await?.into_future().await };
+        let res = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        } else {
+            handle.block_on(fut)
+        };
         res.map_err(|e| e.reason.clone())
     })
 }

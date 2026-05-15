@@ -188,7 +188,17 @@ impl WalkRunner {
             Err(err) => {
                 drop(tx_entry);
                 drop(tx_error);
-                utils::print_and_flush(stderr, &format!("Failed to parse configuration.\n{err}\n"));
+                let mut msg = format!("Failed to parse configuration.\n{err}\n");
+                // Nested configs are loaded lazily during the walk, so by the
+                // time a load failure surfaces some files in unaffected scopes
+                // may already have been written. Format is idempotent — fix
+                // the offending config and re-run.
+                if matches!(format_mode, OutputMode::Write) {
+                    msg.push_str(
+                        "Files in unaffected scopes may have already been written; re-run after fixing the config.\n",
+                    );
+                }
+                utils::print_and_flush(stderr, &msg);
                 return CliRunResult::InvalidOptionConfig;
             }
         };
