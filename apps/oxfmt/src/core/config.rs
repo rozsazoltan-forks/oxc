@@ -98,44 +98,45 @@ pub fn find_unique_config_by_readdir(
 }
 
 // ---
-// Shared on-demand config discovery infrastructure.
+
+// Shared on-demand nested-config detection infrastructure.
 //
-// Discovery state is centralized in `DiscoveryCtx` so Phase 2 (direct file
-// targets), Phase 3 (parallel walk), and the stdin path all share one cache
-// (each load runs at most once walk-wide) and one signal (`any_config_found`).
+// State is centralized in `NestedConfigCtx` so Phase 2 (direct file targets),
+// Phase 3 (parallel walk), and the stdin path all share one cache (each load
+// runs at most once walk-wide) and one signal (`any_config_found`).
 
 /// Result of loading a direct config in a single directory.
-pub type ConfigLoadResult = Result<Option<Arc<ConfigResolver>>, String>;
+type ConfigLoadResult = Result<Option<Arc<ConfigResolver>>, String>;
 
 /// Walk-wide shared cache for direct-config loads.
 ///
 /// Each entry's `OnceLock` ensures the underlying load runs at most once per
 /// directory across all visitors and across phases.
-pub type ConfigLoadCache = Arc<Mutex<FxHashMap<PathBuf, Arc<OnceLock<ConfigLoadResult>>>>>;
+type ConfigLoadCache = Arc<Mutex<FxHashMap<PathBuf, Arc<OnceLock<ConfigLoadResult>>>>>;
 
 /// Walk-wide shared map of "directory has a direct config" entries.
 ///
 /// **Lock discipline**: never hold this lock across a `ConfigLoadCache` load.
 /// Acquire the read/write lock, do the lookup or insert, release immediately.
-pub type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
+type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
 
-/// Shared discovery context: cached `ConfigDiscovery` + load cache + scope map +
-/// loader inputs (`editorconfig_path`, `js_config_loader`) + the
-/// `any_config_found` signal.
+/// Shared nested-config detection context: cached `ConfigDiscovery` + load
+/// cache + scope map + loader inputs (`editorconfig_path`, `js_config_loader`)
+/// + the `any_config_found` signal.
 ///
 /// Cloning is shallow (each field is already `Arc` / `Copy`).
 #[derive(Clone)]
-pub struct DiscoveryCtx {
-    pub discovery: ConfigDiscovery,
-    pub editorconfig_path: Option<Arc<Path>>,
+pub struct NestedConfigCtx {
+    discovery: ConfigDiscovery,
+    editorconfig_path: Option<Arc<Path>>,
     #[cfg(feature = "napi")]
-    pub js_config_loader: Option<JsConfigLoaderCb>,
-    pub any_config_found: Arc<AtomicBool>,
-    pub scope_by_dir: ScopeByDir,
-    pub config_load_cache: ConfigLoadCache,
+    js_config_loader: Option<JsConfigLoaderCb>,
+    any_config_found: Arc<AtomicBool>,
+    scope_by_dir: ScopeByDir,
+    config_load_cache: ConfigLoadCache,
 }
 
-impl DiscoveryCtx {
+impl NestedConfigCtx {
     pub fn new(
         editorconfig_path: Option<Arc<Path>>,
         #[cfg(feature = "napi")] js_config_loader: Option<JsConfigLoaderCb>,
@@ -151,13 +152,53 @@ impl DiscoveryCtx {
         }
     }
 
+    /// Returns `true` if `path`'s file name matches a supported config file.
+    pub fn is_config_file(&self, path: &Path) -> bool {
+        self.discovery.discover_config_file(path).is_some()
+    }
+
+    /// Look up a registered scope for `dir` without probing.
+    pub fn lookup_scope(&self, dir: &Path) -> Option<Arc<ConfigResolver>> {
+        self.scope_by_dir.read().expect("scope_by_dir rwlock poisoned").get(dir).cloned()
+    }
+
+    pub fn config_found(&self) -> bool {
+        self.any_config_found.load(Ordering::Relaxed)
+    }
+
+    /// Read `scope_by_dir` for `dir`; on miss, probe via the load cache and
+    /// register the result.
+    ///
+    /// Returns:
+    /// - `Ok(Some(_))` — `dir` has a direct config (registered).
+    /// - `Ok(None)` — `dir` has no direct config, or Vite+ `.fmt` missing.
+    /// - `Err(_)` — load / parse / validate failure.
+    ///
+    /// On a successful load, the `any_config_found` signal is set and the
+    /// resolver is inserted into `scope_by_dir` (only the first writer wins).
+    pub fn probe_dir(&self, dir: &Path) -> Result<Option<Arc<ConfigResolver>>, String> {
+        if let Some(hit) = self.lookup_scope(dir) {
+            return Ok(Some(hit));
+        }
+
+        match self.get_or_load_direct_config(dir)? {
+            Some(loaded) => {
+                self.any_config_found.store(true, Ordering::Relaxed);
+                let mut guard = self.scope_by_dir.write().expect("scope_by_dir rwlock poisoned");
+                guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::clone(&loaded));
+                Ok(Some(loaded))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Get-or-compute the direct-config load result for `dir`, dedupe walk-wide.
     ///
     /// `OnceLock::get_or_init` blocks concurrent callers for the same `dir`
     /// until the first init completes. `Ok(Some(_))` / `Ok(None)` / `Err(_)`
     /// are all cached, so broken configs are not retried and "no config in
     /// this dir" lookups stay O(1).
-    pub fn get_or_load_direct_config(&self, dir: &Path) -> ConfigLoadResult {
+    fn get_or_load_direct_config(&self, dir: &Path) -> ConfigLoadResult {
         // Acquire (or insert) the cell, then drop the outer mutex immediately.
         let cell = {
             let mut guard =
@@ -175,45 +216,6 @@ impl DiscoveryCtx {
             )
         })
         .clone()
-    }
-
-    /// Mark that a nested config was discovered. Idempotent.
-    pub fn mark_config_found(&self) {
-        self.any_config_found.store(true, Ordering::Relaxed);
-    }
-
-    pub fn config_found(&self) -> bool {
-        self.any_config_found.load(Ordering::Relaxed)
-    }
-
-    /// Read `scope_by_dir` for `dir`; on miss, probe via the load cache and
-    /// register the result.
-    ///
-    /// Returns:
-    /// - `Ok(Some(_))` — `dir` has a direct config (registered).
-    /// - `Ok(None)` — `dir` has no direct config, or Vite+ `.fmt` missing.
-    /// - `Err(_)` — load / parse / validate failure.
-    ///
-    /// On a successful load, `mark_config_found()` is called and the resolver
-    /// is inserted into `scope_by_dir` (only the first writer wins per dir).
-    pub fn probe_dir(&self, dir: &Path) -> Result<Option<Arc<ConfigResolver>>, String> {
-        let hit = {
-            let guard = self.scope_by_dir.read().expect("scope_by_dir rwlock poisoned");
-            guard.get(dir).cloned()
-        };
-        if hit.is_some() {
-            return Ok(hit);
-        }
-
-        match self.get_or_load_direct_config(dir)? {
-            Some(loaded) => {
-                self.mark_config_found();
-                let mut guard = self.scope_by_dir.write().expect("scope_by_dir rwlock poisoned");
-                guard.entry(dir.to_path_buf()).or_insert_with(|| Arc::clone(&loaded));
-                Ok(Some(loaded))
-            }
-            None => Ok(None),
-        }
     }
 }
 

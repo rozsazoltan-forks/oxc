@@ -12,7 +12,7 @@ use super::{
     },
 };
 use crate::core::{
-    ConfigResolver, DiscoveryCtx, ExternalFormatter, FormatResult, JsConfigLoaderCb,
+    ConfigResolver, ExternalFormatter, FormatResult, JsConfigLoaderCb, NestedConfigCtx,
     ResolveOutcome, SourceFormatter, classify_file_kind, resolve_editorconfig_path, utils,
 };
 
@@ -106,7 +106,7 @@ impl StdinRunner {
         let detect_nested =
             config_options.config.is_none() && !config_options.disable_nested_config;
         let config_resolver = if detect_nested {
-            let ctx = DiscoveryCtx::new(
+            let ctx = NestedConfigCtx::new(
                 editorconfig_path.as_deref().map(Arc::from),
                 Some(Arc::clone(&self.js_config_loader)),
             );

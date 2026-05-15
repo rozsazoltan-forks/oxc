@@ -10,7 +10,7 @@ mod external_formatter;
 #[cfg(feature = "napi")]
 mod js_config;
 
-pub use config::{ConfigResolver, DiscoveryCtx, ResolveOutcome, resolve_editorconfig_path};
+pub use config::{ConfigResolver, NestedConfigCtx, ResolveOutcome, resolve_editorconfig_path};
 // `config_discovery` is consumed only by LSP code paths (napi-gated).
 #[cfg(feature = "napi")]
 pub use config::config_discovery;

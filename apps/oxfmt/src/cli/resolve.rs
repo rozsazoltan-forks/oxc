@@ -5,7 +5,7 @@ use std::{
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::core::{ConfigResolver, DiscoveryCtx, utils::normalize_relative_path};
+use crate::core::{ConfigResolver, NestedConfigCtx, utils::normalize_relative_path};
 
 /// Resolve ignore file paths from CLI args or defaults.
 ///
@@ -116,7 +116,7 @@ pub(super) fn is_ignored(
 pub(super) fn resolve_file_scope_config(
     file: &Path,
     root_config_resolver: &Arc<ConfigResolver>,
-    ctx: &DiscoveryCtx,
+    ctx: &NestedConfigCtx,
 ) -> Result<Arc<ConfigResolver>, String> {
     let Some(parent) = file.parent() else {
         return Ok(Arc::clone(root_config_resolver));
