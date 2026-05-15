@@ -16,18 +16,18 @@ pub fn resolve_editorconfig_path(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Load `.editorconfig` from a path if provided.
-pub fn load_editorconfig(
-    cwd: &Path,
-    editorconfig_path: Option<&Path>,
-) -> Result<Option<EditorConfig>, String> {
+///
+/// Section patterns like `[src/*.ts]` are anchored at the `.editorconfig`'s
+/// own directory, so `path.parent()` is used as the base. Real callers always
+/// pass an absolute path (via `resolve_editorconfig_path`), making the `.` fallback
+/// only a theoretical safety net for a bare `.editorconfig` filename.
+pub fn load_editorconfig(editorconfig_path: Option<&Path>) -> Result<Option<EditorConfig>, String> {
     match editorconfig_path {
         Some(path) => {
             let str = utils::read_to_string(path)
                 .map_err(|_| format!("Failed to read {}: File not found", path.display()))?;
-
-            // Use the directory containing `.editorconfig` as the base, not the CLI's cwd.
-            // This ensures patterns like `[src/*.ts]` are resolved relative to where `.editorconfig` is located.
-            Ok(Some(EditorConfig::parse(&str).with_cwd(path.parent().unwrap_or(cwd))))
+            let cwd = path.parent().unwrap_or_else(|| Path::new("."));
+            Ok(Some(EditorConfig::parse(&str).with_cwd(cwd)))
         }
         None => Ok(None),
     }

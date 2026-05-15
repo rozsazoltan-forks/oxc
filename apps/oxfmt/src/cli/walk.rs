@@ -181,13 +181,18 @@ impl ScopedWalker {
                 // This is needed for cases like `husky`, may specify ignored paths as staged files.
                 // NOTE: Git ignored paths are not filtered here.
                 // But it's OK because in cases like `husky`, they are never staged.
-                if is_ignored(&ignore_file_matchers, path, path.is_dir(), true) {
+                //
+                // One `metadata()` call gives us both `is_dir` and `is_file`, so Phase 2
+                // can skip its own `file.is_file()` re-check (large file-target lists
+                // from husky-style invocations would otherwise pay 2 stats per path).
+                let Ok(metadata) = path.metadata() else { continue };
+                let is_dir = metadata.is_dir();
+                if is_ignored(&ignore_file_matchers, path, is_dir, true) {
                     continue;
                 }
-
-                if path.is_dir() {
+                if is_dir {
                     dirs.push(path.clone());
-                } else {
+                } else if metadata.is_file() {
                     files.push(path.clone());
                 }
             }
@@ -209,10 +214,8 @@ impl ScopedWalker {
         if !file_targets.is_empty() {
             let mut scope_cache: FxHashMap<&Path, Arc<ConfigResolver>> = FxHashMap::default();
             for file in &file_targets {
-                // Skip non-existent files (WalkBuilder naturally skips these via error entries)
-                if !file.is_file() {
-                    continue;
-                }
+                // Phase 1 already verified each entry is a regular file via
+                // `metadata()`, so no redundant `is_file()` stat here.
 
                 let file_config = if detect_nested {
                     let parent = file.parent().unwrap();

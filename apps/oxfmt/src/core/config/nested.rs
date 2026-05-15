@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use editorconfig_parser::EditorConfig;
 use rustc_hash::FxHashMap;
 
 use oxc_config::{ConfigConflict, ConfigDiscovery, DiscoveredConfigFile};
@@ -27,16 +28,20 @@ use super::{
 /// target) are skipped. This matches the walker's `follow_links(false)`
 /// behavior so config discovery and file traversal stay consistent.
 ///
+/// Takes a borrowed `ConfigDiscovery` so the caller's cached instance is
+/// reused — building one calls `vp_version()` which acquires Rust's global
+/// `ENV_LOCK`, serializing parallel callers on a hot path.
+///
 /// Returns `Ok(None)` when `dir` is unreadable; the caller can decide whether
 /// that warrants a diagnostic.
-pub fn find_unique_config_by_readdir(
+fn find_unique_config_by_readdir(
+    discovery: &ConfigDiscovery,
     dir: &Path,
 ) -> Result<Option<DiscoveredConfigFile>, ConfigConflict> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(None);
     };
 
-    let discovery = config_discovery();
     // Cache the supported names once; the iteration body needs only name comparison.
     let config_names = discovery.config_file_names();
     let mut matches = Vec::new();
@@ -91,6 +96,13 @@ type ConfigLoadCache = Arc<Mutex<FxHashMap<PathBuf, Arc<OnceLock<ConfigLoadResul
 /// Acquire the read/write lock, do the lookup or insert, release immediately.
 type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
 
+/// Walk-wide shared cache for the parsed `.editorconfig`.
+///
+/// Loaded on first access (via `OnceLock`) and cloned per nested-config load
+/// instead of re-reading and re-parsing the same file for every probed dir.
+/// `Err` is cached too, so a malformed `.editorconfig` is not retried.
+type EditorconfigCache = Arc<OnceLock<Result<Option<EditorConfig>, String>>>;
+
 /// Shared nested-config detection context: cached `ConfigDiscovery` + load
 /// cache + scope map + loader inputs (`editorconfig_path`, `js_config_loader`)
 /// + the `any_config_found` signal.
@@ -100,6 +112,7 @@ type ScopeByDir = Arc<RwLock<FxHashMap<PathBuf, Arc<ConfigResolver>>>>;
 pub struct NestedConfigCtx {
     discovery: ConfigDiscovery,
     editorconfig_path: Option<Arc<Path>>,
+    editorconfig_cache: EditorconfigCache,
     #[cfg(feature = "napi")]
     js_config_loader: Option<JsConfigLoaderCb>,
     any_config_found: Arc<AtomicBool>,
@@ -115,12 +128,21 @@ impl NestedConfigCtx {
         Self {
             discovery: config_discovery(),
             editorconfig_path,
+            editorconfig_cache: Arc::new(OnceLock::new()),
             #[cfg(feature = "napi")]
             js_config_loader,
             any_config_found: Arc::new(AtomicBool::new(false)),
             scope_by_dir: Arc::new(RwLock::new(FxHashMap::default())),
             config_load_cache: Arc::new(Mutex::new(FxHashMap::default())),
         }
+    }
+
+    /// Get the parsed `.editorconfig`, loading once and reusing the cached
+    /// `EditorConfig` (or cached `Err`) for every subsequent caller.
+    fn cached_editorconfig(&self) -> Result<Option<EditorConfig>, String> {
+        self.editorconfig_cache
+            .get_or_init(|| load_editorconfig(self.editorconfig_path.as_deref()))
+            .clone()
     }
 
     /// Returns `true` if `path`'s file name matches a supported config file.
@@ -179,9 +201,11 @@ impl NestedConfigCtx {
         };
 
         cell.get_or_init(|| {
+            let editorconfig = self.cached_editorconfig()?;
             load_direct_config_in_dir(
+                &self.discovery,
                 dir,
-                self.editorconfig_path.as_deref(),
+                editorconfig,
                 #[cfg(feature = "napi")]
                 self.js_config_loader.as_ref(),
             )
@@ -197,17 +221,17 @@ impl NestedConfigCtx {
 /// matches `discover_config`'s "skip and continue" semantics applied at a
 /// single-dir scope.
 fn load_direct_config_in_dir(
+    discovery: &ConfigDiscovery,
     dir: &Path,
-    editorconfig_path: Option<&Path>,
+    editorconfig: Option<EditorConfig>,
     #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
 ) -> Result<Option<Arc<ConfigResolver>>, String> {
-    let Some(config_file) = find_unique_config_by_readdir(dir)
+    let Some(config_file) = find_unique_config_by_readdir(discovery, dir)
         .map_err(|e| Into::<oxc_diagnostics::OxcDiagnostic>::into(e).to_string())?
     else {
         return Ok(None);
     };
 
-    let editorconfig = load_editorconfig(dir, editorconfig_path)?;
     let load_err = |err: String| format!("Failed to load config in {}: {err}", dir.display());
 
     let Some(mut resolver) = build_resolver_from_discovered(

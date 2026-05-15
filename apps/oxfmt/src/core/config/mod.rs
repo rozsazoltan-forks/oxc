@@ -252,7 +252,7 @@ impl ConfigResolver {
         #[cfg(feature = "napi")] js_config_loader: Option<&JsConfigLoaderCb>,
     ) -> Result<Self, String> {
         // Always load the nearest `.editorconfig` if exists
-        let editorconfig = load_editorconfig(cwd, editorconfig_path)?;
+        let editorconfig = load_editorconfig(editorconfig_path)?;
 
         // Explicit path: normalize and load directly
         if let Some(config_path) = oxfmtrc_path {
