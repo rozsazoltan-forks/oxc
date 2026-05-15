@@ -96,33 +96,30 @@ impl StdinRunner {
             }
         }
 
-        // Resolve filepath to absolute for nested config resolution
+        // Resolve filepath to absolute for nested config resolution and ignore check
         let filepath = utils::normalize_relative_path(&cwd, &filepath);
 
-        // Wrap root config in `Arc` so the on-demand discovery API can short-circuit
-        // when the file's ancestor walk reaches `root_config_dir`.
+        // Follow the same logic as `walk_runner` to resolve `config_resolver`
         let root_config_resolver = Arc::new(config_resolver);
-
-        let detect_nested =
-            config_options.config.is_none() && !config_options.disable_nested_config;
-        let config_resolver = if detect_nested {
-            let ctx = NestedConfigCtx::new(
-                editorconfig_path.as_deref().map(Arc::from),
-                Some(Arc::clone(&self.js_config_loader)),
-            );
-            match resolve_file_scope_config(&filepath, &root_config_resolver, &ctx) {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    utils::print_and_flush(
-                        stderr,
-                        &format!("Failed to load configuration file.\n{err}\n"),
-                    );
-                    return CliRunResult::InvalidOptionConfig;
+        let config_resolver =
+            if config_options.config.is_none() && !config_options.disable_nested_config {
+                let ctx = NestedConfigCtx::new(
+                    editorconfig_path.as_deref().map(Arc::from),
+                    Some(Arc::clone(&self.js_config_loader)),
+                );
+                match resolve_file_scope_config(&filepath, &root_config_resolver, &ctx) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        utils::print_and_flush(
+                            stderr,
+                            &format!("Failed to load configuration file.\n{err}\n"),
+                        );
+                        return CliRunResult::InvalidOptionConfig;
+                    }
                 }
-            }
-        } else {
-            Arc::clone(&root_config_resolver)
-        };
+            } else {
+                root_config_resolver
+            };
 
         // Check if the file is ignored by global ignores or config's `ignorePatterns`
         let global_matchers = match resolve_ignore_paths(&cwd, &ignore_options.ignore_path)

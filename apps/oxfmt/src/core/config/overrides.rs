@@ -4,12 +4,12 @@ use oxc_config::GlobSet;
 
 use crate::core::oxfmtrc::{FormatConfig, OxfmtOverrideConfig};
 
-/// Resolved overrides from `.oxfmtrc` for file-specific matching.
-/// Similar to `EditorConfig`, this handles `FormatConfig` override resolution.
+/// Resolved overrides for file-specific matching.
+/// Similar to `EditorConfig`, this also handles `FormatConfig` override resolution.
 #[derive(Debug)]
 pub struct OxfmtrcOverrides {
     base_dir: Option<PathBuf>,
-    entries: Vec<OxfmtrcOverrideEntry>,
+    entries: Vec<OverrideEntry>,
 }
 
 impl OxfmtrcOverrides {
@@ -18,7 +18,7 @@ impl OxfmtrcOverrides {
             base_dir,
             entries: overrides
                 .into_iter()
-                .map(|o| OxfmtrcOverrideEntry {
+                .map(|o| OverrideEntry {
                     files: o.files,
                     exclude_files: o.exclude_files,
                     options: o.options,
@@ -50,7 +50,7 @@ impl OxfmtrcOverrides {
             .into_owned()
     }
 
-    fn is_entry_match(entry: &OxfmtrcOverrideEntry, relative: &str) -> bool {
+    fn is_entry_match(entry: &OverrideEntry, relative: &str) -> bool {
         entry.files.is_match(relative) && !entry.exclude_files.is_match(relative)
     }
 }
@@ -60,7 +60,7 @@ impl OxfmtrcOverrides {
 /// A single override entry with normalized glob patterns.
 /// NOTE: Written path patterns are glob patterns; use `/` as the path separator on all platforms.
 #[derive(Debug)]
-struct OxfmtrcOverrideEntry {
+struct OverrideEntry {
     files: GlobSet,
     exclude_files: GlobSet,
     options: FormatConfig,

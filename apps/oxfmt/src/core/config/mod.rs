@@ -49,8 +49,12 @@ pub fn config_discovery() -> ConfigDiscovery {
 /// Build a `ConfigResolver` from a single discovered config file (no ancestor walk,
 /// no `build_and_validate`).
 ///
-/// Returns `Ok(None)` for the Vite+ "missing `.fmt`" case so callers can decide
-/// whether to skip-and-continue (ancestor walk) or treat it as "no config in this dir".
+/// NOTE: Returns `Ok(None)` when the discovered file is a `vite.config.ts` whose
+/// default export lacks a `.fmt` field.
+/// Callers decide how to handle it:
+/// - [`ConfigResolver::from_config`] (explicit `--config`): treat as an error
+/// - [`ConfigResolver::discover_config`] (ancestor walk): skip and continue upward
+/// - [`NestedConfigCtx::load_direct_in_dir`] (nested probe): no config in this dir
 pub fn build_resolver_from_discovered(
     config_file: DiscoveredConfigFile,
     editorconfig: Option<EditorConfig>,
@@ -273,8 +277,7 @@ impl ConfigResolver {
                             .expect("JS config loader must be set when `napi` feature is enabled"),
                         &path,
                     )?
-                    // In Vite+ mode, `loadVitePlusConfig` returns `null` when `.fmt` is missing.
-                    // For explicitly specified config, this is always an error.
+                    // Explicit `--config`: missing `.fmt` is an error.
                     .ok_or_else(|| {
                         format!(
                             "Expected a `fmt` field in the default export of {}",
@@ -303,9 +306,6 @@ impl ConfigResolver {
     }
 
     /// Auto-discover and load config by searching upwards from `cwd`.
-    ///
-    /// Tries each candidate file in priority order. If a `vite.config.ts` is found
-    /// but lacks a `.fmt` field, it is skipped and the search continues.
     fn discover_config(
         cwd: &Path,
         editorconfig: Option<EditorConfig>,
@@ -320,7 +320,7 @@ impl ConfigResolver {
                 continue;
             };
 
-            // Vite+ with `.fmt` missing returns `None` → keep searching upwards.
+            // `Ok(None)` (Vite+ `.fmt` missing) → keep searching upwards.
             if let Some(resolver) = build_resolver_from_discovered(
                 config_file,
                 editorconfig.clone(),
@@ -496,8 +496,7 @@ impl ConfigResolver {
 
 /// Load a JS/TS config file via NAPI and return the raw JSON value.
 ///
-/// Returns `Ok(None)` when the JS side returns `null` for `vite.config.ts` without `.fmt` field,
-/// signaling that this config should be skipped during auto-discovery.
+/// Returns `Ok(None)` when the JS side returns `null` (Vite+ `.fmt` missing).
 #[cfg(feature = "napi")]
 fn load_js_config(
     js_config_loader: &JsConfigLoaderCb,

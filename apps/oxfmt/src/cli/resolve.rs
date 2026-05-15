@@ -5,7 +5,7 @@ use std::{
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::core::{ConfigResolver, NestedConfigCtx, utils::normalize_relative_path};
+use crate::core::{ConfigResolver, NestedConfigCtx, utils};
 
 /// Resolve ignore file paths from CLI args or defaults.
 ///
@@ -17,7 +17,7 @@ pub(super) fn resolve_ignore_paths(
     if !ignore_paths.is_empty() {
         let mut result = Vec::with_capacity(ignore_paths.len());
         for path in ignore_paths {
-            let path = normalize_relative_path(cwd, path);
+            let path = utils::normalize_relative_path(cwd, path);
             if !path.exists() {
                 return Err(format!("{}: File not found", path.display()));
             }
@@ -108,11 +108,11 @@ pub(super) fn is_ignored(
     false
 }
 
-/// Resolve the nearest config scope for an explicit file target. Falls back to root.
+/// Resolve the nearest config scope for an explicit file target, or fall back to root config.
 ///
-/// Reaching `root_config_resolver.config_dir()` returns the pre-built root
-/// resolver directly — re-loading via the shared cache would create a
-/// duplicate `Arc` and (for JS root configs) re-invoke the NAPI loader.
+/// If directory matches `root_config_resolver.config_dir()`, returns the pre-built root resolver directly.
+/// Otherwise, re-loading via the shared cache would create a duplicate `Arc`
+/// and re-invoke the NAPI loader for JS config.
 pub(super) fn resolve_file_scope_config(
     file: &Path,
     root_config_resolver: &Arc<ConfigResolver>,
@@ -121,8 +121,8 @@ pub(super) fn resolve_file_scope_config(
     let Some(parent) = file.parent() else {
         return Ok(Arc::clone(root_config_resolver));
     };
-    let root_config_dir = root_config_resolver.config_dir();
 
+    let root_config_dir = root_config_resolver.config_dir();
     for dir in parent.ancestors() {
         if Some(dir) == root_config_dir {
             return Ok(Arc::clone(root_config_resolver));
