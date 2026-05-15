@@ -12,11 +12,12 @@ use tracing::instrument;
 use oxc_config::{all_paths_have_vcs_boundary, configure_walk_builder};
 use oxc_diagnostics::{DiagnosticSender, DiagnosticService, OxcDiagnostic};
 
-use super::resolve::{build_global_ignore_matchers, is_ignored, resolve_file_scope_config};
+use super::resolve::{build_global_ignore_matchers, is_ignored};
 #[cfg(feature = "napi")]
 use crate::core::JsConfigLoaderCb;
 use crate::core::{
     ConfigResolver, FormatStrategy, NestedConfigCtx, ResolveOutcome, classify_file_kind,
+    resolve_file_scope_config,
 };
 
 /// Orchestrates file discovery with nested config and ignore handling.
@@ -174,20 +175,16 @@ impl ScopedWalker {
                     file.display(),
                 );
 
-                let config_resolver = if detect_nested {
-                    let parent = file.parent().unwrap();
-                    if !scope_cache.contains_key(parent) {
-                        let resolved = resolve_file_scope_config(
-                            file,
-                            &root_config_resolver,
-                            &nested_config_ctx,
-                        )?;
-                        scope_cache.insert(parent, resolved);
-                    }
-                    Arc::clone(&scope_cache[parent])
-                } else {
-                    Arc::clone(&root_config_resolver)
-                };
+                let parent = file.parent().unwrap();
+                if !scope_cache.contains_key(parent) {
+                    let resolved = resolve_file_scope_config(
+                        file,
+                        &root_config_resolver,
+                        detect_nested.then_some(&nested_config_ctx),
+                    )?;
+                    scope_cache.insert(parent, resolved);
+                }
+                let config_resolver = Arc::clone(&scope_cache[parent]);
 
                 if config_resolver.is_path_ignored(file, false) {
                     continue;
@@ -893,7 +890,7 @@ mod tests_scope_resolution {
         let root_resolver = Arc::new(root_resolver);
 
         let ctx = make_ctx();
-        let resolved = resolve_file_scope_config(&target_file, &root_resolver, &ctx)
+        let resolved = resolve_file_scope_config(&target_file, &root_resolver, Some(&ctx))
             .expect("resolve file scope");
 
         assert!(

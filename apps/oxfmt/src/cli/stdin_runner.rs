@@ -7,13 +7,12 @@ use std::{
 
 use super::{
     CliRunResult, FormatCommand, Mode,
-    resolve::{
-        build_global_ignore_matchers, is_ignored, resolve_file_scope_config, resolve_ignore_paths,
-    },
+    resolve::{build_global_ignore_matchers, is_ignored, resolve_ignore_paths},
 };
 use crate::core::{
     ConfigResolver, ExternalFormatter, FormatResult, JsConfigLoaderCb, NestedConfigCtx,
-    ResolveOutcome, SourceFormatter, classify_file_kind, resolve_editorconfig_path, utils,
+    ResolveOutcome, SourceFormatter, classify_file_kind, resolve_editorconfig_path,
+    resolve_file_scope_config, utils,
 };
 
 pub struct StdinRunner {
@@ -99,27 +98,28 @@ impl StdinRunner {
         // Resolve filepath to absolute for nested config resolution and ignore check
         let filepath = utils::normalize_relative_path(&cwd, &filepath);
 
-        // Follow the same logic as `walk_runner` to resolve `config_resolver`
-        let root_config_resolver = Arc::new(config_resolver);
-        let config_resolver =
-            if config_options.config.is_none() && !config_options.disable_nested_config {
-                let ctx = NestedConfigCtx::new(
+        // Follow the same logic as `walk_runner` to resolve `config_resolver`.
+        let nested_ctx = (config_options.config.is_none() && !config_options.disable_nested_config)
+            .then(|| {
+                NestedConfigCtx::new(
                     editorconfig_path.as_deref().map(Arc::from),
                     Some(Arc::clone(&self.js_config_loader)),
+                )
+            });
+        let config_resolver = match resolve_file_scope_config(
+            &filepath,
+            &Arc::new(config_resolver),
+            nested_ctx.as_ref(),
+        ) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                utils::print_and_flush(
+                    stderr,
+                    &format!("Failed to load configuration file.\n{err}\n"),
                 );
-                match resolve_file_scope_config(&filepath, &root_config_resolver, &ctx) {
-                    Ok(resolved) => resolved,
-                    Err(err) => {
-                        utils::print_and_flush(
-                            stderr,
-                            &format!("Failed to load configuration file.\n{err}\n"),
-                        );
-                        return CliRunResult::InvalidOptionConfig;
-                    }
-                }
-            } else {
-                root_config_resolver
-            };
+                return CliRunResult::InvalidOptionConfig;
+            }
+        };
 
         // Check if the file is ignored by global ignores or config's `ignorePatterns`
         let global_matchers = match resolve_ignore_paths(&cwd, &ignore_options.ignore_path)
